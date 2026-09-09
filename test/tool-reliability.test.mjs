@@ -34,6 +34,23 @@ test('schemas reject malformed and misspelled arguments before any edit', async 
   assert.equal(await readFile(path.join(root, 'note.txt'), 'utf8'), content);
 });
 
+test('existing files distinguish missing, invalid and stale edit hashes', async (t) => {
+  const { registry, hash } = await fixture(t);
+  await assert.rejects(
+    registry.execute('write_file', { path: 'note.txt', content: 'replacement', expected_sha256: '' }),
+    (error) => error.code === 'EXPECTED_HASH_REQUIRED'
+  );
+  await assert.rejects(
+    registry.execute('write_file', { path: 'note.txt', content: 'replacement', expected_sha256: 'sha256:made-up' }),
+    (error) => error.code === 'INVALID_FILE_HASH'
+  );
+  await assert.rejects(
+    registry.execute('write_file', { path: 'note.txt', content: 'replacement', expected_sha256: 'a'.repeat(64) }),
+    (error) => error.code === 'FILE_CHANGED'
+  );
+  assert.match(hash, /^[a-f0-9]{64}$/);
+});
+
 test('reads support larger files with honest pagination, raw content and full-file hashes', async (t) => {
   const content = ('x'.repeat(100) + '\r\n').repeat(4000);
   const { registry, hash } = await fixture(t, content);
@@ -189,4 +206,26 @@ test('nested edits and command directories use the same path normalization witho
   await writeFile(path.join(root, '@literal.txt'), 'literal');
   assert.equal((await normalizeToolArguments(state, 'read_file', { path: '@literal.txt' })).args.path, '@literal.txt');
   assert.equal((await normalizeToolArguments(state, 'run_command', { executable: 'node', cwd: root })).args.cwd, '.');
+});
+
+test('normalization reuses only a covering read hash that no later mutation invalidated', async (t) => {
+  const { root, registry, content, hash } = await fixture(t);
+  const fullRead = await registry.execute('read_file', { path: 'note.txt' });
+  const state = {
+    registry,
+    workspaceRoot: root,
+    timeline: [{ type: 'tool', name: 'read_file', ok: true, args: { path: 'note.txt' }, result: fullRead }]
+  };
+  const whole = await normalizeToolArguments(state, 'write_file', { path: 'note.txt', content: content.toUpperCase(), expected_sha256: '' });
+  assert.equal(whole.args.expected_sha256, hash);
+  assert.match(whole.adjustments.join(' '), /latest unchanged read_file SHA-256/);
+  const lineEdit = await normalizeToolArguments(state, 'delete_lines', { path: 'note.txt', start_line: 2, end_line: 2, expected_sha256: 'stale' });
+  assert.equal(lineEdit.args.expected_sha256, hash);
+  const read = await normalizeToolArguments(state, 'read_file', { path: 'note.txt', expected_sha256: hash });
+  assert.equal('expected_sha256' in read.args, false);
+  assert.match(read.adjustments.join(' '), /read-only/);
+
+  state.timeline.push({ type: 'tool', name: 'write_file', ok: true, args: { path: 'note.txt' }, result: { files: [{ path: 'note.txt', sha256: 'new' }] } });
+  const invalidated = await normalizeToolArguments(state, 'write_file', { path: 'note.txt', content: 'later', expected_sha256: '' });
+  assert.equal(invalidated.args.expected_sha256, '');
 });

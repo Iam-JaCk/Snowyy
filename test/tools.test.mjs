@@ -153,7 +153,11 @@ test('line tools preview changes and transactions roll back atomically', async (
     { path: 'b.txt', content: 'changed b\n', expected_sha256: b.sha256 }
   ] });
   assert.equal(transaction.files.length, 2);
-  await registry.execute('rollback_change', { transaction_id: transaction.transaction_id });
+  const firstRollback = await registry.execute('rollback_change', { transaction_id: transaction.transaction_id });
+  const repeatedRollback = await registry.execute('rollback_change', { transaction_id: transaction.transaction_id });
+  assert.equal(firstRollback.already_rolled_back, false);
+  assert.equal(repeatedRollback.already_rolled_back, true);
+  assert.deepEqual(repeatedRollback.files, ['a.txt', 'b.txt']);
   assert.equal(await readFile(path.join(workspace, 'a.txt'), 'utf8'), 'one\nTWO\nthree\n');
   assert.equal(await readFile(path.join(workspace, 'b.txt'), 'utf8'), 'alpha\n');
   assert.ok(lineEdit.transaction_id);

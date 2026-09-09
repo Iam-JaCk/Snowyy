@@ -35,6 +35,8 @@ const MUTATING_TOOL_NAMES = new Set([
   'write_file', 'apply_patch', 'insert_text', 'replace_lines', 'delete_lines',
   'apply_changes', 'rollback_change', 'run_command'
 ]);
+const FILE_EDIT_TOOL_NAMES = new Set(['write_file', 'apply_patch', 'insert_text', 'replace_lines', 'delete_lines']);
+const FRESH_READ_RECOVERY_CODES = new Set(['EXPECTED_HASH_REQUIRED', 'INVALID_FILE_HASH', 'FILE_CHANGED', 'PATCH_NOT_FOUND', 'PATCH_AMBIGUOUS', 'INVALID_LINE_RANGE', 'SYNTAX_INVALID']);
 const SESSION_MUTATING_TOOL_NAMES = new Set(['create_goal', 'update_goal', 'delete_goal']);
 
 let desktopFolderPicker = null;
@@ -203,6 +205,7 @@ function recoveryToolChoice(state, content) {
 
 function recoveryMessages(state, forcedToolName) {
   const activity = recentToolActivity(state.timeline, 14_000) || 'No completed tool activity is available.';
+  const recoveryReason = state.recoveryReason || 'The previous response did not advance the unfinished request.';
   return [
     {
       role: 'system',
@@ -210,7 +213,7 @@ function recoveryMessages(state, forcedToolName) {
     },
     {
       role: 'user',
-      content: `Original request:\n${state.lastUserContent}\n\nRecent completed tool activity:\n${activity}\n\nThe previous assistant response failed because it described or claimed an action without calling a tool:\n${String(state.failedAssistantContent || '').slice(0, 4_000)}\n\nEmit the required tool call now.`
+      content: `Original request:\n${state.lastUserContent}\n\nRecovery reason:\n${recoveryReason}\n\nRecent completed tool activity:\n${activity}\n\nPrevious response or tool failure:\n${String(state.failedAssistantContent || '').slice(0, 4_000)}\n\nEmit the required tool call now.`
     }
   ];
 }
@@ -427,6 +430,14 @@ function publicToolCall(toolCall, args, registry = tools) {
   };
 }
 
+function scheduleFreshReadRecovery(state, name, args, result) {
+  if (!FILE_EDIT_TOOL_NAMES.has(name) || !FRESH_READ_RECOVERY_CODES.has(result?.code)) return;
+  if (!state.allowedTools.has('read_file') || typeof args?.path !== 'string' || !args.path) return;
+  state.forceToolChoice = specificToolChoice('read_file');
+  state.recoveryReason = `${name} failed with ${result.code}. Read the current target before attempting another edit.`;
+  state.failedAssistantContent = `${result.error || 'The edit failed.'}\n${result.suggestion || ''}`.trim();
+}
+
 function toolResultMessage(toolCall, result) {
   return {
     role: 'tool',
@@ -463,6 +474,7 @@ async function executeTool(response, state, toolCall, args) {
   state.messages.push(toolResultMessage(toolCall, result));
   const trace = [...state.timeline].reverse().find((item) => item.type === 'tool' && item.id === toolCall.id);
   if (trace) Object.assign(trace, { status: ok ? 'complete' : 'failed', ok, result, completedAt: new Date().toISOString() });
+  if (!ok) scheduleFreshReadRecovery(state, name, args, result);
   await persistAgentState(state);
   sendEvent(response, 'tool_result', { id: toolCall.id, name, ok, result });
 }
@@ -503,6 +515,7 @@ async function processToolQueue(response, state, approvalDecision = null) {
       const result = toolFailure(error, 'TOOL_ERROR', state.workspaceRoot);
       state.messages.push(toolResultMessage(toolCall, result));
       state.timeline.push({ type: 'tool', id: toolCall.id, name, args, argumentAdjustments, status: 'failed', ok: false, result, completedAt: new Date().toISOString() });
+      scheduleFreshReadRecovery(state, name, args, result);
       await persistAgentState(state);
       sendEvent(response, 'tool_result', { id: toolCall.id, name, ok: false, result });
       state.toolIndex += 1;
@@ -526,6 +539,7 @@ async function processToolQueue(response, state, approvalDecision = null) {
           state.messages.push(toolResultMessage(toolCall, result));
           const trace = [...state.timeline].reverse().find((item) => item.type === 'tool' && item.id === toolCall.id);
           if (trace) Object.assign(trace, { status: 'failed', ok: false, result, completedAt: new Date().toISOString() });
+          scheduleFreshReadRecovery(state, name, args, result);
           await persistAgentState(state);
           sendEvent(response, 'tool_result', { id: toolCall.id, name, ok: false, result });
           state.toolIndex += 1;
@@ -658,6 +672,7 @@ async function runAgent(response, state, approvalDecision = null) {
           }
           state.guardContinuations += 1;
           state.forceToolChoice = guard.requireTool ? recoveryToolChoice(state, guard.decisionText) : false;
+          state.recoveryReason = guard.reason;
           state.failedAssistantContent = guard.decisionText;
           state.messages.push({
             role: 'system',
@@ -677,6 +692,7 @@ async function runAgent(response, state, approvalDecision = null) {
 
       state.guardContinuations = 0;
       state.forceToolChoice = false;
+      state.recoveryReason = '';
       state.failedAssistantContent = '';
 
       state.toolRounds += 1;
@@ -842,6 +858,7 @@ async function handleChat(request, response) {
     outputContinuationPending: false,
     lastOutputLimitProgress: '',
     forceToolChoice: false,
+    recoveryReason: '',
     failedAssistantContent: '',
     signal: controller.signal,
     config: { ...config },

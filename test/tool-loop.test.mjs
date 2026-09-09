@@ -79,6 +79,31 @@ test('invalid JSON and schema errors become tool replies; valid calls still run 
   assert.deepEqual(app.requests[1].messages.filter((message) => message.role === 'tool').map((message) => message.tool_call_id), ['bad-json', 'bad-schema', 'good-read']);
 });
 
+test('a stale whole-file write is forced through a fresh read and repaired safely', async (t) => {
+  const app = await fixture(t, (body, round) => {
+    if (round === 1) return { tool_calls: [call('stale-write', 'write_file', { path: 'note.txt', content: 'updated\n', expected_sha256: '' })] };
+    if (round === 2) {
+      assert.equal(body.tool_choice, 'required');
+      assert.deepEqual(body.tools.map((tool) => tool.function.name), ['read_file']);
+      assert.match(body.messages.at(-1).content, /write_file failed with EXPECTED_HASH_REQUIRED/);
+      return { tool_calls: [call('forced-current-read', 'read_file', { path: 'note.txt', expected_sha256: '' })] };
+    }
+    if (round === 3) return { tool_calls: [call('repaired-write', 'write_file', { path: 'note.txt', content: 'updated\n', expected_sha256: '' })] };
+    return { content: 'Replaced note.txt after verifying its current content.' };
+  });
+  const stream = await app.chat('Replace the complete note.txt file.', { approvalMode: 'always' });
+  const results = events(stream, 'tool_result');
+  assert.deepEqual(results.map((event) => [event.name, event.ok]), [
+    ['write_file', false], ['read_file', true], ['write_file', true]
+  ]);
+  assert.equal(await readFile(path.join(app.root, 'note.txt'), 'utf8'), 'updated\n');
+  const sessionId = events(stream, 'session')[0].id;
+  const session = (await (await fetch(`${app.url}/api/sessions/${sessionId}`)).json()).session;
+  const repaired = session.timeline.find((entry) => entry.id === 'repaired-write');
+  assert.match(repaired.args.expected_sha256, /^[a-f0-9]{64}$/);
+  assert.match(repaired.argumentAdjustments.join(' '), /latest unchanged read_file SHA-256/);
+});
+
 test('planning can search files while attempted writes are rejected before path normalization', async (t) => {
   const app = await fixture(t, (_body, round) => round === 1 ? { tool_calls: [
     call('disabled-write', 'write_file', { path: '../outside.txt', content: 'no', expected_sha256: '' }),
