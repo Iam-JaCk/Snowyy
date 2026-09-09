@@ -33,6 +33,16 @@ test('read tools inspect only the configured workspace', async (t) => {
   assert.equal(read.sha256, createHash('sha256').update(source).digest('hex'));
 });
 
+test('Windows workspace aliases and path casing resolve inside the same sandbox', async (t) => {
+  if (process.platform !== 'win32') return t.skip('Windows path comparison only.');
+  const workspace = await temporaryWorkspace();
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  await writeFile(path.join(workspace, 'note.txt'), 'visible\n');
+  const registry = createToolRegistry(workspace.toUpperCase());
+  const read = await registry.execute('read_file', { path: 'note.txt' });
+  assert.equal(read.content, 'visible\n');
+});
+
 test('path traversal is rejected', async (t) => {
   const workspace = await temporaryWorkspace();
   t.after(() => rm(workspace, { recursive: true, force: true }));
