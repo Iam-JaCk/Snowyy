@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0b0d0c" />
+    <title>Snowyy — Local AI Terminal</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand-row">
+          <a class="brand" href="#" aria-label="Snowyy home">
+            <span class="brand-mark" aria-hidden="true">S</span>
+            <span>Snowyy</span>
+          </a>
+          <button class="icon-button mobile-only" id="closeSidebar" aria-label="Close sidebar">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
+          </button>
+        </div>
+
+        <button class="new-session" id="newSession">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+          New session
+          <kbd>⌘ N</kbd>
+        </button>
+
+        <nav class="session-nav" aria-label="Sessions">
+          <button class="session-section-toggle" id="sessionToggle" type="button" aria-expanded="true" aria-controls="sessionList">
+            <span>Sessions</span><small id="sessionCount">0</small><span class="session-toggle-chevron">⌄</span>
+          </button>
+          <div class="session-list" id="sessionList">
+            <p class="session-empty">No saved sessions yet.</p>
+          </div>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="usage-row">
+            <span>Context</span><span id="contextValue">0 / 32k</span>
+          </div>
+          <div class="progress-track"><span id="contextBar"></span></div>
+          <button class="profile-button" id="workspaceButton">
+            <span class="avatar">YL</span>
+            <span><strong id="workspaceName">Local workspace</strong><small id="workspaceState">Click to change folder</small></span>
+            <span class="chevron">⌄</span>
+          </button>
+        </div>
+      </aside>
+
+      <div class="sidebar-scrim" id="sidebarScrim"></div>
+
+      <main class="main-panel">
+        <header class="topbar">
+          <div class="topbar-left">
+            <button class="icon-button menu-button" id="openSidebar" aria-label="Open sidebar">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
+            </button>
+            <div>
+              <h1 id="sessionTitle">New session</h1>
+              <p><span class="live-dot"></span> Session running</p>
+            </div>
+          </div>
+          <div class="topbar-actions">
+            <button class="icon-button" id="fileBrowserButton" aria-label="Open workspace files" title="Workspace files">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5h6l2 2h10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-11Z" /></svg>
+            </button>
+            <button class="model-select" id="modelSelect">
+              <span class="model-glyph">◇</span>
+              <span><small>Model</small><strong id="modelName">Connecting…</strong></span>
+              <span class="chevron">⌄</span>
+            </button>
+            <button class="icon-button" id="themeToggle" aria-label="Toggle theme">
+              <svg class="sun-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"/></svg>
+            </button>
+          </div>
+
+          <div class="model-menu" id="modelMenu">
+            <button data-preset="ollama"><span>◫</span><span><strong>Llama 3.2</strong><small>Ollama · local</small></span><i></i></button>
+            <button data-preset="gpt-oss"><span>◇</span><span><strong>gpt-oss:20b</strong><small>Ollama · local</small></span><i></i></button>
+            <button data-configure><span>⌁</span><span><strong>Configure provider</strong><small>Endpoint, model, and key</small></span><i>→</i></button>
+          </div>
+        </header>
+
+        <aside class="file-drawer" id="fileDrawer" aria-hidden="true">
+          <div class="drawer-header"><div><p class="eyebrow">WORKSPACE</p><h2>Explorer</h2></div><button class="icon-button" id="closeFileDrawer" aria-label="Close files"><svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12" /></svg></button></div>
+          <div class="file-workbench">
+            <section class="explorer-pane" aria-label="Workspace explorer">
+              <div class="file-search"><input id="fileSearchInput" type="search" placeholder="Search files…"/><button id="fileSearchButton">Search</button></div>
+              <div class="explorer-toolbar">
+                <button id="fileParentButton" type="button" title="Parent folder" aria-label="Open parent folder">↑</button>
+                <button class="file-breadcrumb" id="fileBreadcrumb" type="button" title="Return to workspace root">.</button>
+                <button id="refreshFiles" type="button" title="Refresh files" aria-label="Refresh files">↻</button>
+              </div>
+              <div class="file-list" id="fileList"></div>
+            </section>
+            <section class="file-preview" id="filePreview" aria-label="File editor">
+              <div class="preview-header">
+                <strong id="previewPath">Select a file</strong>
+                <div class="preview-actions">
+                  <button id="cancelFileEdit" class="secondary-button" type="button" hidden>Cancel</button>
+                  <button id="saveFileEdit" class="approve-button" type="button" hidden disabled>Save</button>
+                  <button id="editPreviewFile" class="secondary-button" type="button" disabled>Edit</button>
+                  <button id="attachPreviewFile" class="secondary-button" type="button" disabled>Add to context</button>
+                </div>
+              </div>
+              <div class="editor-notice" id="editorNotice">Choose a workspace file to preview or edit it.</div>
+              <div class="editor-surface">
+                <div class="code-viewer" id="previewContent" aria-label="File contents"></div>
+                <textarea class="file-editor-input" id="fileEditorInput" aria-label="Edit file contents" spellcheck="false" hidden></textarea>
+              </div>
+              <div class="editor-statusbar"><span id="editorLanguage">Plain Text</span><span id="editorFileStatus">No file open</span><span id="editorPosition">Ln 1, Col 1</span></div>
+            </section>
+          </div>
+        </aside>
+
+        <section class="conversation" id="conversation" aria-live="polite">
+          <div class="conversation-inner">
+            <div class="welcome-block">
+              <div class="terminal-badge">~/</div>
+              <div>
+                <p class="eyebrow">WORKSPACE · SNOWYY</p>
+                <h2>What should we build?</h2>
+                <p>Snowyy can inspect your workspace, edit files, and run commands—with your approval.</p>
+              </div>
+            </div>
+
+          </div>
+        </section>
+
+        <section class="goal-panel" id="goalPanel" aria-label="Session goals" hidden>
+          <div class="goal-panel-header"><span>Goals</span><small id="goalCount">0</small></div>
+          <div class="goal-list" id="goalList"></div>
+        </section>
+
+        <footer class="composer-wrap">
+          <div class="permission-toast" id="permissionToast">
+            <span class="shield-icon">!</span>
+            <span><strong id="permissionTitle">Approval required</strong><small id="permissionDetail">Review this tool call before continuing.</small></span>
+            <button class="text-button deny" data-permission="deny">Deny</button>
+            <button class="approve-button" data-permission="approve">Approve once</button>
+          </div>
+
+          <form class="composer" id="composerForm">
+            <div class="attachment-preview-strip" id="attachmentPreviewStrip" hidden></div>
+            <div class="slash-menu" id="slashMenu" hidden></div>
+            <div class="mention-menu" id="mentionMenu" role="listbox" aria-label="Workspace files" hidden></div>
+            <textarea id="promptInput" rows="1" placeholder="Ask Snowyy to explore, build, or debug…" aria-label="Message Snowyy"></textarea>
+            <input id="localAttachmentInput" type="file" multiple hidden accept="image/png,image/jpeg,image/webp,image/gif,text/*,.json,.md,.js,.mjs,.cjs,.ts,.tsx,.jsx,.css,.html,.xml,.yaml,.yml,.toml,.csv,.lua,.luau,.py,.java,.c,.h,.cpp,.hpp,.rs,.go,.sql,.sh,.ps1" />
+            <div class="composer-footer">
+              <div class="composer-tools">
+                <button type="button" class="composer-tool" id="attachFiles" title="Attach files or screenshots" aria-label="Attach files or screenshots">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                </button>
+                <span class="mode-pill"><span class="live-dot"></span> Agent mode</span>
+                <span class="workspace-pill">~/Snowyy</span>
+                <span class="attachment-pill" id="attachmentPill" hidden></span>
+              </div>
+              <div class="send-area">
+                <span class="shortcut-hint">Enter to send</span>
+                <button class="send-button" id="sendButton" type="submit" aria-label="Send message" disabled>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 19V5"/></svg>
+                </button>
+              </div>
+            </div>
+          </form>
+          <p class="disclaimer">Snowyy CAN'T make mistakes. Snowyy is a chad.</p>
+        </footer>
+      </main>
+    </div>
+
+    <div class="modal-backdrop" id="settingsModal" aria-hidden="true">
+      <section class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+        <div class="settings-header">
+          <div><p class="eyebrow">MODEL PROVIDER</p><h2 id="settingsTitle">Connect Snowyy</h2></div>
+          <button class="icon-button" id="closeSettings" aria-label="Close settings">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
+          </button>
+        </div>
+        <form id="settingsForm">
+          <label>Base URL<input id="baseUrlInput" type="url" required placeholder="http://127.0.0.1:11434/v1" /></label>
+          <label>Model
+            <div class="model-input-row">
+              <select id="modelSelectInput" required aria-describedby="modelDiscoveryStatus">
+                <option value="">Loading models…</option>
+              </select>
+              <button type="button" class="model-refresh-button" id="refreshModels" title="Refresh available models" aria-label="Refresh available models">↻
+              </button>
+            </div>
+            <input id="modelInput" class="custom-model-input" type="text" placeholder="Enter a model name" hidden />
+            <small id="modelDiscoveryStatus">Open this list to choose a model from the provider.</small>
+          </label>
+          <label>API key <span>optional · held in memory only</span><input id="apiKeyInput" type="password" autocomplete="off" placeholder="Leave blank to keep the current key" /></label>
+          <label class="clear-key-row"><input id="clearApiKeyInput" type="checkbox" /> Clear the currently loaded API key</label>
+          <fieldset class="agent-controls">
+            <legend>Agent controls</legend>
+            <label class="clear-key-row"><input id="planningOnlyInput" type="checkbox" /> Planning only — allow read-only tools</label>
+            <label>Maximum context tokens <span>1,000–5,000,000 · remembered for new sessions</span><input id="maxContextInput" type="number" min="1000" max="5000000" step="1" value="32000" /></label>
+            <label class="clear-key-row approval-always-row"><input id="approvalAlwaysInput" type="checkbox" /> Automatically approve writes and commands</label>
+            <div class="tool-policy-grid" id="toolPolicyGrid"></div>
+          </fieldset>
+          <div class="settings-status" id="settingsStatus"><span></span><p>Configuration has not been tested yet.</p></div>
+          <div class="settings-actions">
+            <button type="button" class="secondary-button" id="testProvider">Test connection</button>
+            <button type="submit" class="approve-button">Save configuration</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <div class="modal-backdrop" id="workspaceModal" aria-hidden="true">
+      <section class="settings-modal workspace-modal" role="dialog" aria-modal="true" aria-labelledby="workspaceTitle">
+        <div class="settings-header">
+          <div><p class="eyebrow">PROJECT ENVIRONMENT</p><h2 id="workspaceTitle">Open a workspace</h2></div>
+          <button class="icon-button" id="closeWorkspace" aria-label="Close workspace picker">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
+          </button>
+        </div>
+        <form id="workspaceForm">
+          <label>Directory path<input id="workspacePathInput" type="text" required placeholder="C:\path\to\your\project" /></label>
+          <p class="workspace-help">Snowyy tools will be sandboxed to this directory. Opening a saved session restores its workspace.</p>
+          <div class="settings-status" id="workspaceStatus"><span></span><p>Select a local project directory.</p></div>
+          <div class="settings-actions workspace-actions">
+            <button type="button" class="secondary-button" id="browseWorkspace">Browse…</button>
+            <button type="submit" class="approve-button">Open workspace</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <div class="modal-backdrop approval-backdrop" id="approvalModal" aria-hidden="true">
+      <section class="approval-modal" role="dialog" aria-modal="true" aria-labelledby="approvalModalTitle">
+        <div class="settings-header"><div><p class="eyebrow">REVIEW CHANGE</p><h2 id="approvalModalTitle">Approval required</h2><small id="approvalModalDetail"></small></div></div>
+        <div class="diff-tabs" id="diffTabs"></div>
+        <pre class="diff-view" id="diffView">No diff preview available.</pre>
+        <div class="proposal-editor" id="proposalEditor" hidden><label id="proposalEditorLabel">Replacement text</label><textarea id="proposalEditorInput"></textarea></div>
+        <div class="approval-actions">
+          <button class="text-button deny" data-modal-decision="deny">Deny</button>
+          <button class="secondary-button" id="editProposal">Edit proposal</button>
+          <button class="approve-button" data-modal-decision="approve">Approve once</button>
+        </div>
+      </section>
+    </div>
+
+    <template id="userMessageTemplate">
+      <article class="message user-message entering">
+        <div class="message-avatar user-avatar">Y</div>
+        <div class="message-body">
+          <div class="message-meta"><strong>You</strong><span></span></div>
+          <p class="dynamic-copy"></p>
+        </div>
+      </article>
+    </template>
+
+    <template id="assistantMessageTemplate">
+      <article class="message assistant-message entering">
+        <div class="message-avatar snowyy-avatar">S</div>
+        <div class="message-body">
+          <div class="message-meta"><strong>Snowyy</strong><span></span></div>
+          <div class="thinking-row"><span></span><span></span><span></span><em>Thinking</em></div>
+        </div>
+      </article>
+    </template>
+
+    <div class="app-version" id="appVersion" title="Snowyy build version">v...</div>
+
+    <script src="markdown.js"></script>
+    <script src="ui-helpers.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

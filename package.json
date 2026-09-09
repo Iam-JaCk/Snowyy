@@ -1,0 +1,42 @@
+{
+  "name": "snowyy-local-agent",
+  "version": "0.6.13",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.mjs",
+  "productName": "Snowyy",
+  "author": "Snowyy",
+  "description": "A local, provider-neutral LLM terminal with permission-aware tools.",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs",
+    "desktop": "electron-forge start",
+    "package": "electron-forge package --platform=win32 --arch=x64",
+    "make": "electron-forge make --platform=win32 --arch=x64",
+    "test": "node --test test/*.test.mjs",
+    "publish:update": "node scripts/publish-update.mjs",
+    "publish:github": "node scripts/publish-github.mjs",
+    "update-checks": "node utils/update-checker.mjs",
+    "update-checks:deploy": "node scripts/publish-update.mjs --verify"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "electron-squirrel-startup": "^1.0.1",
+    "express": "^5.2.1",
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^7.11.2",
+    "@electron-forge/maker-squirrel": "^7.11.2",
+    "@electron-forge/publisher-github": "^7.11.2",
+    "@electron/get": "^3.1.0",
+    "@types/node": "^22.20.1",
+    "electron": "^43.1.1",
+    "electron-winstaller": "^5.4.4",
+    "fs-extra": "^8.1.0",
+    "webpack": "^5.108.4"
+  },
+  "engines": {
+    "node": ">=22.12"
+  }
+}

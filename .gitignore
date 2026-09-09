@@ -1,0 +1,37 @@
+.env
+.env.*
+!.env.example
+.node_modules/
+*.min.js.map
+.git/
+.vscode/
+.idea/
+.Snowyy/
+.out/
+out/
+releases/
+coverage/
+dist/
+*.log
+node_modules/
+
+# Credentials and signing material must be supplied outside the repository.
+*.p12
+*.pfx
+*.key
+*.agekey
+age-key.txt
+.sops.age.key
+/credentials/
+/secrets/
+
+# Local migration and agent scratch files.
+/.tmp_update_checker.mjs
+/.update_checker_backup.mjs
+/update-checker-mr-marker.txt
+/C--Users-yigit-Desktop-Snowyy/
+/editing.mjs
+/test_improvements.mjs
+/update-checker.mjs
+/updates.json
+/QWEN.md
