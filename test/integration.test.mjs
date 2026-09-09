@@ -109,6 +109,10 @@ test('agent pauses a write, resumes after approval, and streams completion', asy
       sendStream(response, [{ choices: [{ delta: { content: 'The file contains `class Recovered {}`.' }, finish_reason: 'stop' }] }]);
       return;
     }
+    if (lastText.includes('Look at this screenshot and update the project file shown.')) {
+      sendStream(response, [{ choices: [{ delta: { content: 'Applying the requested screenshot-guided edit.', tool_calls: [{ index: 0, id: 'vision_edit', type: 'function', function: { name: 'apply_patch', arguments: '{"path":"note.txt","old_text":"Console.WriteLine(\\"Hi Snowyy!\\");","new_text":"Console.WriteLine(\\"Hi Snowyy!\\"); // screenshot checked"}' } }] }, finish_reason: 'tool_calls' }] }]);
+      return;
+    }
     if (lastText.includes('Look at this screenshot')) {
       sendStream(response, [{ choices: [{ delta: { content: 'I can see the attachment.' }, finish_reason: 'stop' }] }]);
       return;
@@ -320,13 +324,15 @@ test('agent pauses a write, resumes after approval, and streams completion', asy
     body: JSON.stringify({ messages: [{ role: 'user', content: 'Create a file but keep promising instead.' }] })
   });
   const boundedGuardStream = await boundedGuardResponse.text();
-  assert.equal((boundedGuardStream.match(/"status":"continuing"/g) || []).length, 1);
+  assert.equal((boundedGuardStream.match(/"status":"continuing"/g) || []).length, 2);
   assert.match(boundedGuardStream, /The model repeatedly stopped before completing the request/);
   const boundedGuardRequests = providerBodies.filter((body) => body.messages.some((message) => message.role === 'user' && String(message.content).includes('Create a file but keep promising instead.')));
-  assert.equal(boundedGuardRequests.length, 2);
+  assert.equal(boundedGuardRequests.length, 3);
   assert.equal(boundedGuardRequests[0].tool_choice, 'auto');
   assert.equal(boundedGuardRequests[1].tool_choice, 'required');
   assert.deepEqual(boundedGuardRequests[1].tools.map((tool) => tool.function.name), ['write_file']);
+  assert.equal(boundedGuardRequests[2].tool_choice, 'required');
+  assert.deepEqual(boundedGuardRequests[2].tools.map((tool) => tool.function.name), ['write_file']);
 
   const contextualEditResponse = await fetch(`${baseUrl}/api/chat`, {
     method: 'POST',

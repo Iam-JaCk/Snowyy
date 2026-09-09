@@ -30,7 +30,7 @@ const pendingApprovals = new Map();
 const runningCommands = new Map();
 const sessionStore = createSessionStore(path.resolve(process.env.SESSION_STORE_PATH || path.join(appDirectory, '.Snowyy', 'sessions.json')));
 const APPROVAL_TTL_MS = 10 * 60 * 1000;
-const MAX_COMPLETION_GUARD_RETRIES = 1;
+const MAX_COMPLETION_GUARD_RETRIES = 2;
 const MUTATING_TOOL_NAMES = new Set([
   'write_file', 'apply_patch', 'insert_text', 'replace_lines', 'delete_lines',
   'apply_changes', 'rollback_change', 'run_command'
@@ -84,6 +84,23 @@ function requestRequiresMutation(content) {
   return directRequest || new RegExp(`\\b${action}\\b[\\s\\S]*\\b${target}\\b|\\b${target}\\b[\\s\\S]*\\b${action}\\b`, 'i').test(text);
 }
 
+function isContinuationPrompt(content) {
+  const text = String(content || '').trim().toLowerCase().replace(/[.!?…]+$/u, '').trim();
+  return /^(?:continue|please continue|continue working|go on|keep going|keep working|carry on|proceed|resume|finish|finish it|finish this|do it)$/.test(text);
+}
+
+function activeUserRequest(messages, latestContent) {
+  if (!isContinuationPrompt(latestContent)) return String(latestContent || '');
+  const earlier = (Array.isArray(messages) ? messages : [])
+    .filter((message) => message?.role === 'user')
+    .map((message) => String(message.content || '').trim())
+    .filter((content) => content && content !== String(latestContent || '').trim())
+    .reverse();
+  return earlier.find((content) => requestRequiresMutation(content) || imageRequestNeedsWorkspaceTools(content))
+    || earlier.find((content) => !isContinuationPrompt(content))
+    || String(latestContent || '');
+}
+
 function collapseRepeatedAssistantParagraphs(content) {
   const text = String(content || '');
   const paragraphs = text.split(/\n\s*\n/);
@@ -135,8 +152,9 @@ function looksLikePendingToolAction(content, allowedTools) {
   const text = String(content || '');
   const names = [...allowedTools].map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
   const mentionsTool = names.length && new RegExp(`\\b(?:${names.join('|')})\\b`, 'i').test(text);
-  const promisesAction = /\b(?:i(?:'ll| will| need to| am going to)|let me|next,? i(?:'ll| will)|i can now)\b[\s\S]{0,240}\b(?:call|use|read|write|edit|create|inspect|check|find|search|run|retry|try|fix|continue|proceed)\b/i.test(text);
-  return Boolean(mentionsTool && promisesAction);
+  const promisesAction = /\b(?:i(?:['’]ll| will| need to| am going to)|let me|next,? i(?:['’]ll| will)|i can now)\b[\s\S]{0,280}\b(?:call|use|read|re-read|open|write|edit|modify|update|patch|apply|implement|create|add|remove|replace|inspect|verify|check|find|search|run|test|build|retry|try|fix|start|continue|proceed)\b/i.test(text);
+  const toolHandoff = Boolean(mentionsTool && /\b(?:next|now|again|first|then|retry|continue|proceed|start)\b/i.test(text));
+  return promisesAction || toolHandoff;
 }
 
 function looksLikeUnsupportedMutationClaim(content) {
@@ -150,12 +168,28 @@ function specificToolChoice(name) {
 function recoveryToolChoice(state, content) {
   const text = String(content || '').toLowerCase();
   const request = String(state.lastUserContent || '').toLowerCase();
+  const latestTool = [...state.timeline.slice(state.turnTimelineStart)].reverse().find((item) => item.type === 'tool');
   if (looksLikeUnsupportedMutationClaim(content) && state.requestRequiresMutation) {
     if (state.allowedTools.has('write_file') && /\b(?:create|new file)\b/.test(request)) return specificToolChoice('write_file');
     if (state.allowedTools.has('apply_patch')) return specificToolChoice('apply_patch');
   }
   const turnTimeline = state.timeline.slice(state.turnTimelineStart);
   const successfulRead = turnTimeline.some((item) => item.type === 'tool' && item.name === 'read_file' && item.ok === true);
+  if (state.allowedTools.has('web_search') && /\bsearch\b/.test(text) && ['fetch_url', 'web_search'].includes(latestTool?.name)) {
+    return specificToolChoice('web_search');
+  }
+  if (state.allowedTools.has('read_file') && /\b(?:re-?read|read|open|inspect)\b[\s\S]{0,100}\b(?:file|source|code)\b|\b(?:file|source|code)\b[\s\S]{0,100}\b(?:again|from the (?:beginning|start))\b/.test(text)) {
+    return specificToolChoice('read_file');
+  }
+  if (state.requestRequiresMutation && state.allowedTools.has('write_file') && /\b(?:create|add|write)\b[\s\S]{0,80}\bnew\b[\s\S]{0,80}\bfile\b|\bnew file\b/.test(`${text}\n${request}`)) {
+    return specificToolChoice('write_file');
+  }
+  if (state.requestRequiresMutation && state.allowedTools.has('apply_patch') && /\b(?:edit|modify|update|patch|apply|implement|fix|change|add|remove|replace)\b/.test(text)) {
+    return specificToolChoice('apply_patch');
+  }
+  if (state.requestNeedsWorkspaceTools && state.allowedTools.has('run_command') && /\b(?:run|test|build|install)\b/.test(text)) {
+    return specificToolChoice('run_command');
+  }
   if (!successfulRead && state.allowedTools.has('read_file') && /\b(?:read|inspect|open|check)\b/.test(text)) {
     return specificToolChoice('read_file');
   }
@@ -181,31 +215,43 @@ function recoveryMessages(state, forcedToolName) {
   ];
 }
 
-function completionGuardReason(state, assistant) {
-  if (!state.definitions.length || !assistant.content?.trim()) return null;
+function completionGuard(state, assistant) {
+  if (!state.definitions.length) return null;
+  const visibleContent = String(assistant.content || '').trim();
+  const reasoningContent = String(assistant.reasoning || '').trim();
+  const decisionText = visibleContent || reasoningContent;
   const turnTimeline = state.timeline.slice(state.turnTimelineStart);
   const successfulMutation = turnTimeline.some((item) => (
     item.type === 'tool' && item.ok === true && MUTATING_TOOL_NAMES.has(item.name)
   ));
   const latestTool = [...turnTimeline].reverse().find((item) => item.type === 'tool');
-  const pendingAction = looksLikePendingToolAction(assistant.content, state.allowedTools);
-  const unsupportedMutationClaim = looksLikeUnsupportedMutationClaim(assistant.content);
+  const pendingAction = looksLikePendingToolAction(decisionText, state.allowedTools);
+  const unsupportedMutationClaim = looksLikeUnsupportedMutationClaim(visibleContent);
   const mutationToolAvailable = state.definitions.some((tool) => MUTATING_TOOL_NAMES.has(tool.function.name));
 
   // A denial is an explicit user decision, not a recoverable model/tool error.
   if (latestTool?.result?.denied === true) return null;
 
   if (pendingAction && latestTool?.ok === false) {
-    return 'The previous tool attempt failed, and the response promised another tool action without making the call.';
+    return { reason: 'The previous tool attempt failed, and the response promised another tool action without making the call.', requireTool: true, decisionText };
   }
-  if (pendingAction && state.requestNeedsWorkspaceTools) {
-    return 'The response promised a workspace tool action without making the call.';
+  if (pendingAction) {
+    return { reason: 'The response promised a workspace tool action without making the call.', requireTool: true, decisionText };
   }
   if (state.requestRequiresMutation && unsupportedMutationClaim && !successfulMutation) {
-    return 'The response claimed that a workspace change succeeded, but no mutating tool completed successfully.';
+    return { reason: 'The response claimed that a workspace change succeeded, but no mutating tool completed successfully.', requireTool: true, decisionText };
   }
-  if (state.requestRequiresMutation && mutationToolAvailable && !successfulMutation && !looksLikeExplicitBlocker(assistant.content) && !looksLikeClarifyingQuestion(assistant.content)) {
-    return 'The user requested a workspace change, but no mutating tool has completed successfully.';
+  if (state.requestRequiresMutation && mutationToolAvailable && !successfulMutation && !looksLikeExplicitBlocker(visibleContent) && !looksLikeClarifyingQuestion(visibleContent)) {
+    return { reason: 'The user requested a workspace change, but no mutating tool has completed successfully.', requireTool: true, decisionText };
+  }
+  if (!visibleContent) {
+    return {
+      reason: reasoningContent
+        ? 'The model stopped after reasoning without returning an answer or tool call.'
+        : 'The model returned an empty response.',
+      requireTool: false,
+      decisionText
+    };
   }
   return null;
 }
@@ -560,17 +606,17 @@ async function runAgent(response, state, approvalDecision = null) {
       const outputLimited = reachedOutputLimit(assistant.finish_reason);
       const message = { role: 'assistant', content: assistant.content };
       if (assistant.tool_calls?.length && !outputLimited) message.tool_calls = assistant.tool_calls;
-      state.messages.push(message);
+      if (assistant.content || message.tool_calls?.length) state.messages.push(message);
       if (assistant.usage) {
         state.usage = assistant.usage;
         state.timeline.push({ type: 'usage', usage: assistant.usage, createdAt: new Date().toISOString() });
         sendEvent(response, 'usage', assistant.usage);
       }
       if (state.roundReasoning.trim()) {
-        state.timeline.push({ type: 'reasoning', content: state.roundReasoning, createdAt: new Date().toISOString() });
+        state.timeline.push({ type: 'reasoning', content: state.roundReasoning, finishReason: assistant.finish_reason || null, createdAt: new Date().toISOString() });
       }
       if (assistant.content) {
-        state.timeline.push({ type: 'message', role: 'assistant', content: assistant.content, continuation: seamlessRound, createdAt: new Date().toISOString() });
+        state.timeline.push({ type: 'message', role: 'assistant', content: assistant.content, continuation: seamlessRound, finishReason: assistant.finish_reason || null, createdAt: new Date().toISOString() });
         state.roundText = '';
       }
 
@@ -605,19 +651,21 @@ async function runAgent(response, state, approvalDecision = null) {
       state.lastOutputLimitProgress = '';
 
       if (!assistant.tool_calls?.length) {
-        const guardReason = completionGuardReason(state, assistant);
-        if (guardReason) {
+        const guard = completionGuard(state, assistant);
+        if (guard) {
           if (state.guardContinuations >= MAX_COMPLETION_GUARD_RETRIES) {
-            throw new Error(`The model repeatedly stopped before completing the request. ${guardReason}`);
+            throw new Error(`The model repeatedly stopped before completing the request. ${guard.reason}`);
           }
           state.guardContinuations += 1;
-          state.forceToolChoice = recoveryToolChoice(state, assistant.content);
-          state.failedAssistantContent = assistant.content;
+          state.forceToolChoice = guard.requireTool ? recoveryToolChoice(state, guard.decisionText) : false;
+          state.failedAssistantContent = guard.decisionText;
           state.messages.push({
             role: 'system',
-            content: `${guardReason} The request is still active. Continue now: make the necessary tool call in this response, or clearly state the genuine blocker and the exact user input required. Do not ask for a generic confirmation.`
+            content: guard.requireTool
+              ? `${guard.reason} The request is still active. Continue now: make the necessary tool call in this response, or clearly state the genuine blocker and the exact user input required. Do not ask for a generic confirmation.`
+              : `${guard.reason} The request is still active. Return the complete user-facing answer now. Use a tool only if it is actually needed.`
           });
-          sendEvent(response, 'status', { status: 'continuing', round: state.rounds, reason: guardReason });
+          sendEvent(response, 'status', { status: 'continuing', round: state.rounds, reason: guard.reason, recovery: guard.requireTool ? 'tool' : 'answer' });
           continue;
         }
         const saved = await persistAgentState(state);
@@ -748,6 +796,7 @@ async function handleChat(request, response) {
     sendEvent(response, 'compacted', { removedMessages: compacted.removed, summarizedMessages: compacted.context.summarizedMessages });
   }
   const providerConversation = compacted.messages.map((message) => ({ ...message }));
+  const activeRequest = activeUserRequest(conversationMessages, lastUser.content);
   const allowToolsForImage = !imageParts.length || imageRequestNeedsWorkspaceTools(lastUser.content);
   const imageGuidance = [];
   if (imageParts.length) {
@@ -796,9 +845,9 @@ async function handleChat(request, response) {
     failedAssistantContent: '',
     signal: controller.signal,
     config: { ...config },
-    requestNeedsWorkspaceTools: imageRequestNeedsWorkspaceTools(lastUser.content),
-    requestRequiresMutation: requestRequiresMutation(lastUser.content),
-    lastUserContent: lastUser.content
+    requestNeedsWorkspaceTools: imageRequestNeedsWorkspaceTools(activeRequest),
+    requestRequiresMutation: requestRequiresMutation(activeRequest),
+    lastUserContent: activeRequest
   };
   state.goalActions = {
     list: async () => ({ ok: true, goals: structuredClone(state.goals) }),

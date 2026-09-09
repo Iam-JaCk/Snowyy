@@ -151,6 +151,65 @@ test('output-limited responses continue seamlessly and persist as one complete a
   assert.equal(session.timeline.filter((entry) => entry.role === 'assistant').at(-1).continuation, true);
 });
 
+test('a normal stop after a natural-language tool handoff continues automatically', async (t) => {
+  const app = await fixture(t, (body, round) => {
+    if (round === 1) {
+      return { content: 'Now I can see the full picture. Let me fix this by updating the handler. Let me start with the first file:' };
+    }
+    if (round === 2) {
+      assert.equal(body.tool_choice, 'required');
+      assert.deepEqual(body.tools.map((tool) => tool.function.name), ['apply_patch']);
+      return { tool_calls: [call('natural-handoff-edit', 'apply_patch', { path: 'note.txt', old_text: 'hello', new_text: 'updated' })] };
+    }
+    return { content: 'Updated note.txt.' };
+  });
+  const stream = await app.chat('Fix note.txt by updating the handler.', { approvalMode: 'always' });
+  assert.equal(events(stream, 'status').filter((event) => event.status === 'continuing').length, 1);
+  assert.equal(events(stream, 'tool_result')[0].ok, true);
+  assert.equal(events(stream, 'done').length, 1);
+  assert.equal(await readFile(path.join(app.root, 'note.txt'), 'utf8'), 'updated\n');
+});
+
+test('a reasoning-only stop that promises more work forces the missing tool call', async (t) => {
+  const app = await fixture(t, (body, round) => {
+    if (round === 1) {
+      return { reasoning: 'I have enough context from the results. Now let me implement the change, but first let me search more specifically:' };
+    }
+    if (round === 2) {
+      assert.equal(body.tool_choice, 'required');
+      return { tool_calls: [call('reasoning-recovery-read', 'read_file', { path: 'note.txt' })] };
+    }
+    return { content: 'The note contains hello.' };
+  });
+  const stream = await app.chat('Inspect note.txt and continue the work.');
+  const continuing = events(stream, 'status').find((event) => event.status === 'continuing');
+  assert.equal(continuing.recovery, 'tool');
+  assert.equal(events(stream, 'tool_result')[0].ok, true);
+  assert.match(events(stream, 'reasoning')[0].token, /search more specifically/);
+  assert.equal(events(stream, 'done').length, 1);
+});
+
+test('Continue keeps the earlier actionable request in tool recovery context', async (t) => {
+  const app = await fixture(t, (body, round) => {
+    if (round === 1) return { content: 'Which replacement text should I use?' };
+    if (round === 2) return { content: 'I have the context now. Let me implement the edit and start with the first file:' };
+    assert.equal(body.tool_choice, 'required');
+    assert.deepEqual(body.tools.map((tool) => tool.function.name), ['apply_patch']);
+    assert.match(body.messages.at(-1).content, /Original request:\nFix note\.txt/);
+    assert.doesNotMatch(body.messages.at(-1).content, /Original request:\nContinue\./);
+    return { tool_calls: [call('continued-objective-edit', 'apply_patch', { path: 'note.txt', old_text: 'hello', new_text: 'continued' })] };
+  });
+  const first = await app.chat('Fix note.txt by replacing its text.');
+  const sessionId = events(first, 'session')[0].id;
+  assert.equal(events(first, 'done').length, 1);
+  const second = await (await fetch(`${app.url}/api/chat`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, messages: [{ role: 'user', content: 'Continue.' }] })
+  })).text();
+  assert.equal(events(second, 'status').filter((event) => event.status === 'continuing').length, 1);
+  assert.equal(events(second, 'approval').length, 1);
+});
+
 test('an abruptly closed provider stream preserves partial text and reports interruption', async (t) => {
   const app = await fixture(t, () => ({ content: 'Partial but retained.', finish_reason: null, omit_done: true }));
   const stream = await app.chat('Do not lose a partial response.');
