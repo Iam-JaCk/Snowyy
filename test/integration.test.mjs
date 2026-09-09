@@ -413,7 +413,7 @@ test('agent pauses a write, resumes after approval, and streams completion', asy
     body: JSON.stringify({ title: 'Second workspace' })
   });
   const newSession = (await newSessionResponse.json()).session;
-  assert.equal(newSession.workspace, secondWorkspace);
+  assert.equal(newSession.workspace, workspaceBody.path);
   const deleteResponse = await fetch(`${baseUrl}/api/sessions/${newSession.id}`, { method: 'DELETE' });
   assert.equal(deleteResponse.status, 200);
 });
