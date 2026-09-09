@@ -26,6 +26,8 @@ The Files button opens a split workspace explorer and editor. Browse folders on 
 
 The Sessions heading in the sidebar collapses the saved-session list and remembers that preference. Tool traces and the assistant commentary around them are persisted in timeline order, so reopening a session keeps pre-tool comments above tool cards and completion comments below them.
 
+Snowyy checkpoints long tool runs before their arguments and results fill the configured context window. Each checkpoint keeps the active user objective, verified file hashes and mutations, recent failures, and the latest useful read snapshots. Conversation compaction also incorporates verified tool activity, and both kinds of compaction are recorded in the session timeline for diagnostics.
+
 Snowyy defaults to Ollama's compatibility endpoint:
 
 ```text

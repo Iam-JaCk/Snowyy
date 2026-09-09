@@ -587,6 +587,10 @@ async function runAgentRequest(url, payload) {
     status: ({ status, seamless }) => {
       if (status === 'continuing' && !seamless) beginAssistantSegment();
       if (status === 'compacting') $('.topbar p').innerHTML = '<span class="live-dot"></span> Compacting context';
+      if (status === 'thinking') $('.topbar p').innerHTML = '<span class="live-dot"></span> Agent working';
+    },
+    compacted: ({ estimatedTokensAfter }) => {
+      if (Number.isFinite(estimatedTokensAfter)) updateContextMeter(estimatedTokensAfter);
     },
     error: ({ message }) => showError(message),
     context: ({ estimatedTokens, maxContextTokens }) => updateContextMeter(estimatedTokens, null, maxContextTokens),
