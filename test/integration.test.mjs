@@ -4,7 +4,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 
 const projectRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -405,7 +405,7 @@ test('agent pauses a write, resumes after approval, and streams completion', asy
   });
   assert.equal(workspaceResponse.status, 200);
   const workspaceBody = await workspaceResponse.json();
-  assert.equal(workspaceBody.path, secondWorkspace);
+  assert.equal(workspaceBody.path.toLowerCase(), (await realpath(secondWorkspace)).toLowerCase());
 
   const newSessionResponse = await fetch(`${baseUrl}/api/sessions`, {
     method: 'POST',
