@@ -63,3 +63,30 @@ test('provider forwards a separate model reasoning stream', async (t) => {
   assert.equal(result.reasoning, 'Inspecting context. Choosing a tool.');
   assert.equal(result.content, 'Done.');
 });
+
+test('provider accepts a non-streamed JSON fallback and identifies incomplete streams', async (t) => {
+  let requestCount = 0;
+  const server = http.createServer((_request, response) => {
+    requestCount += 1;
+    if (requestCount === 1) {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ choices: [{ message: { content: 'Fallback response.' }, finish_reason: 'stop' }] }, null, 2));
+      return;
+    }
+    response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    response.end('data: {"choices":[{"delta":{"content":"Partial response."}}]}\n\n');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const options = {
+    config: { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, model: 'test', apiKey: '' },
+    messages: [{ role: 'user', content: 'Answer.' }],
+    tools: []
+  };
+  const fallback = await streamChatCompletion(options);
+  assert.equal(fallback.content, 'Fallback response.');
+  assert.equal(fallback.stream_complete, true);
+  const interrupted = await streamChatCompletion(options);
+  assert.equal(interrupted.content, 'Partial response.');
+  assert.equal(interrupted.stream_complete, false);
+});

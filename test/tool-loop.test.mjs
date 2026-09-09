@@ -30,9 +30,13 @@ async function fixture(t, respond) {
     for await (const chunk of request) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks));
     requests.push(body);
-    const message = await respond(body, requests.length);
+    const reply = await respond(body, requests.length);
+    const { finish_reason: configuredFinishReason, omit_done: omitDone, ...message } = reply;
+    const finishReason = Object.hasOwn(reply, 'finish_reason')
+      ? configuredFinishReason
+      : message.tool_calls ? 'tool_calls' : 'stop';
     response.writeHead(200, { 'Content-Type': 'text/event-stream' });
-    response.end(`data: ${JSON.stringify({ choices: [{ message, finish_reason: message.tool_calls ? 'tool_calls' : 'stop' }] })}\n\ndata: [DONE]\n\n`);
+    response.end(`data: ${JSON.stringify({ choices: [{ message, finish_reason: finishReason }] })}\n\n${omitDone ? '' : 'data: [DONE]\n\n'}`);
   });
   await new Promise((resolve) => provider.listen(0, '127.0.0.1', resolve));
   child = spawn(process.execPath, ['server.mjs'], {
@@ -128,6 +132,33 @@ test('agent tool use is not capped at twenty rounds', async (t) => {
   assert.equal(events(stream, 'tool_result').length, 24);
   assert.equal(events(stream, 'done').length, 1);
   assert.equal(app.requests.length, 25);
+});
+
+test('output-limited responses continue seamlessly and persist as one complete assistant turn', async (t) => {
+  const app = await fixture(t, (body, round) => {
+    if (round === 1) return { content: 'The first half ', finish_reason: 'length' };
+    assert.match(body.messages.at(-1).content, /Continue exactly where it ended/);
+    return { content: 'and the second half.', finish_reason: 'stop' };
+  });
+  const stream = await app.chat('Give me the complete answer.');
+  const continuing = events(stream, 'status').find((event) => event.reason === 'output_limit');
+  assert.equal(continuing.seamless, true);
+  assert.equal(events(stream, 'token').map((event) => event.token).join(''), 'The first half and the second half.');
+  assert.equal(events(stream, 'done')[0].finishReason, 'stop');
+  const sessionId = events(stream, 'session')[0].id;
+  const session = (await (await fetch(`${app.url}/api/sessions/${sessionId}`)).json()).session;
+  assert.equal(session.messages.at(-1).content, 'The first half and the second half.');
+  assert.equal(session.timeline.filter((entry) => entry.role === 'assistant').at(-1).continuation, true);
+});
+
+test('an abruptly closed provider stream preserves partial text and reports interruption', async (t) => {
+  const app = await fixture(t, () => ({ content: 'Partial but retained.', finish_reason: null, omit_done: true }));
+  const stream = await app.chat('Do not lose a partial response.');
+  assert.equal(events(stream, 'error')[0].code, 'PROVIDER_STREAM_INTERRUPTED');
+  const sessionId = events(stream, 'session')[0].id;
+  const session = (await (await fetch(`${app.url}/api/sessions/${sessionId}`)).json()).session;
+  assert.equal(session.messages.at(-1).content, 'Partial but retained.');
+  assert.equal(session.timeline.filter((entry) => entry.role === 'assistant').at(-1).content, 'Partial but retained.');
 });
 
 test('automatic compaction persists a clean reusable context summary', async (t) => {

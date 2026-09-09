@@ -584,8 +584,8 @@ async function runAgentRequest(url, payload) {
     goals: ({ goals }) => renderGoals(goals),
     approval: (event) => { paused = true; showApproval(event); },
     paused: () => { paused = true; },
-    status: ({ status }) => {
-      if (status === 'continuing') beginAssistantSegment();
+    status: ({ status, seamless }) => {
+      if (status === 'continuing' && !seamless) beginAssistantSegment();
       if (status === 'compacting') $('.topbar p').innerHTML = '<span class="live-dot"></span> Compacting context';
     },
     error: ({ message }) => showError(message),
@@ -621,7 +621,7 @@ async function sendPrompt(prompt) {
     attachedFiles.clear();
     uploadedAttachments.clear();
     updateAttachmentPill();
-    await runAgentRequest('/api/chat', { messages: conversationHistory, sessionId: activeSessionId, attachments: workspaceAttachments, uploads });
+    await runAgentRequest('/api/chat', { messages: [{ role: 'user', content: userPrompt }], sessionId: activeSessionId, attachments: workspaceAttachments, uploads });
   } catch (error) {
     if (error.name !== 'AbortError') {
       showError(error.message);
@@ -1127,19 +1127,29 @@ function renderSavedMessage(message) {
 
 function renderTimeline(timeline) {
   let traceAssistant = null;
+  let traceParagraph = null;
+  let traceParagraphText = '';
   for (const entry of timeline) {
     if (entry.type === 'message' && entry.role === 'user') {
       appendUserMessage(entry.content);
       traceAssistant = null;
+      traceParagraph = null;
+      traceParagraphText = '';
     } else if (entry.type === 'message' && entry.role === 'assistant') {
       if (!traceAssistant) {
         traceAssistant = appendAssistantMessage();
         removeThinking(traceAssistant);
       }
-      const paragraph = document.createElement('div');
-      paragraph.className = 'streamed-copy markdown-body';
-      renderAssistantMarkdown(paragraph, entry.content);
-      $('.message-body', traceAssistant).append(paragraph);
+      if (entry.continuation && traceParagraph) {
+        traceParagraphText += entry.content;
+        renderAssistantMarkdown(traceParagraph, traceParagraphText);
+      } else {
+        traceParagraph = document.createElement('div');
+        traceParagraph.className = 'streamed-copy markdown-body';
+        traceParagraphText = entry.content;
+        renderAssistantMarkdown(traceParagraph, traceParagraphText);
+        $('.message-body', traceAssistant).append(traceParagraph);
+      }
     } else if (entry.type === 'reasoning') {
       if (!traceAssistant) {
         traceAssistant = appendAssistantMessage();
@@ -1160,6 +1170,8 @@ function renderTimeline(timeline) {
         const state = card && $('.tool-state', card);
         if (state) state.innerHTML = '<i>–</i><span>interrupted</span>';
       }
+      traceParagraph = null;
+      traceParagraphText = '';
     } else if (entry.type === 'usage') {
       updateContextMeter(entry.usage?.total_tokens || entry.usage?.totalTokens || 0, entry.usage?.cost);
     }

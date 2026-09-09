@@ -126,6 +126,11 @@ function looksLikeClarifyingQuestion(content) {
   return /\?\s*$/.test(text) && /\b(?:which|what|where|when|should|would|could|do you|can you|please provide|need)\b/i.test(text);
 }
 
+function reachedOutputLimit(finishReason) {
+  return ['length', 'max_tokens', 'max_output_tokens', 'token_limit']
+    .includes(String(finishReason || '').toLowerCase());
+}
+
 function looksLikePendingToolAction(content, allowedTools) {
   const text = String(content || '');
   const names = [...allowedTools].map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
@@ -521,6 +526,8 @@ async function runAgent(response, state, approvalDecision = null) {
       state.rounds += 1;
       state.roundText = '';
       state.roundReasoning = '';
+      const seamlessRound = state.outputContinuationPending;
+      state.outputContinuationPending = false;
       let roundStarted = false;
       const forcedToolName = typeof state.forceToolChoice === 'object' ? state.forceToolChoice.function?.name : null;
       const roundDefinitions = forcedToolName
@@ -537,7 +544,7 @@ async function runAgent(response, state, approvalDecision = null) {
         signal: state.signal,
         onToken: (token) => {
           if (!roundStarted) {
-            if (state.assistantText.trim()) state.assistantText += '\n\n';
+            if (state.assistantText.trim() && !seamlessRound) state.assistantText += '\n\n';
             roundStarted = true;
           }
           state.assistantText += token;
@@ -550,8 +557,9 @@ async function runAgent(response, state, approvalDecision = null) {
         }
       });
 
+      const outputLimited = reachedOutputLimit(assistant.finish_reason);
       const message = { role: 'assistant', content: assistant.content };
-      if (assistant.tool_calls?.length) message.tool_calls = assistant.tool_calls;
+      if (assistant.tool_calls?.length && !outputLimited) message.tool_calls = assistant.tool_calls;
       state.messages.push(message);
       if (assistant.usage) {
         state.usage = assistant.usage;
@@ -562,9 +570,39 @@ async function runAgent(response, state, approvalDecision = null) {
         state.timeline.push({ type: 'reasoning', content: state.roundReasoning, createdAt: new Date().toISOString() });
       }
       if (assistant.content) {
-        state.timeline.push({ type: 'message', role: 'assistant', content: assistant.content, createdAt: new Date().toISOString() });
+        state.timeline.push({ type: 'message', role: 'assistant', content: assistant.content, continuation: seamlessRound, createdAt: new Date().toISOString() });
         state.roundText = '';
       }
+
+      if (!assistant.stream_complete) {
+        const error = new Error('The provider stream ended before it sent a completion marker. The partial response was saved; retry when the provider connection is stable.');
+        error.code = 'PROVIDER_STREAM_INTERRUPTED';
+        throw error;
+      }
+
+      if (outputLimited) {
+        const progress = JSON.stringify({ content: assistant.content, reasoning: assistant.reasoning, toolCalls: assistant.tool_calls });
+        if (!assistant.content && !assistant.reasoning && !assistant.tool_calls?.length) {
+          const error = new Error('The provider reached its output limit without returning any text. Increase the provider output limit and retry.');
+          error.code = 'PROVIDER_OUTPUT_LIMIT';
+          throw error;
+        }
+        if (progress === state.lastOutputLimitProgress) {
+          const error = new Error('The provider repeated the same limited response instead of continuing. The partial response was saved.');
+          error.code = 'PROVIDER_OUTPUT_STALLED';
+          throw error;
+        }
+        state.lastOutputLimitProgress = progress;
+        state.outputContinuationPending = true;
+        state.messages.push({
+          role: 'system',
+          content: `The provider stopped the previous response because it reached its output-token limit. Continue exactly where it ended without repeating text. Finish the answer and any remaining work.${assistant.tool_calls?.length ? ' The partial tool call was discarded; submit the complete tool call again.' : ''}`
+        });
+        await persistAgentState(state);
+        sendEvent(response, 'status', { status: 'continuing', round: state.rounds, reason: 'output_limit', seamless: true });
+        continue;
+      }
+      state.lastOutputLimitProgress = '';
 
       if (!assistant.tool_calls?.length) {
         const guardReason = completionGuardReason(state, assistant);
@@ -610,6 +648,10 @@ async function runAgent(response, state, approvalDecision = null) {
       response.end();
       return;
     }
+    if (state.roundText?.trim()) {
+      state.timeline.push({ type: 'message', role: 'assistant', content: state.roundText, interrupted: true, createdAt: new Date().toISOString() });
+      state.roundText = '';
+    }
     await persistAgentState(state).catch(() => {});
     sendEvent(response, 'error', { message: error.message, code: error.code || 'AGENT_ERROR' });
     response.end();
@@ -623,9 +665,8 @@ async function handleChat(request, response) {
   }
   const safeMessages = body.messages
     .filter((message) => ['user', 'assistant'].includes(message?.role) && typeof message.content === 'string')
-    .slice(-500)
     .map((message) => {
-      const content = message.content.slice(0, 100_000);
+      const content = message.content;
       return { role: message.role, content: message.role === 'assistant' ? collapseRepeatedAssistantParagraphs(content) : content };
     });
   if (!safeMessages.length || safeMessages.at(-1).role !== 'user') {
@@ -689,7 +730,14 @@ async function handleChat(request, response) {
 
   openEventStream(response);
   const controller = new AbortController();
-  response.on('close', () => controller.abort());
+  const keepAlive = setInterval(() => {
+    if (!response.writableEnded && !response.destroyed) response.write(': keep-alive\n\n');
+  }, 15_000);
+  keepAlive.unref?.();
+  response.on('close', () => {
+    clearInterval(keepAlive);
+    controller.abort();
+  });
   sendEvent(response, 'session', { id: session.id, title: session.title, model: config.model, workspace: path.basename(workspaceRoot), settings, goals: session.goals });
   if (estimateTokens(conversationMessages) > Math.floor(maxContextTokens * 0.55)) {
     sendEvent(response, 'status', { status: 'compacting' });
@@ -742,6 +790,8 @@ async function handleChat(request, response) {
     toolRounds: 0,
     rounds: 0,
     guardContinuations: 0,
+    outputContinuationPending: false,
+    lastOutputLimitProgress: '',
     forceToolChoice: false,
     failedAssistantContent: '',
     signal: controller.signal,

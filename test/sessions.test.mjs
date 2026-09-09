@@ -48,3 +48,21 @@ test('sessions persist, derive titles, reopen, and delete', async (t) => {
   assert.equal(await reloaded.remove(created.id), true);
   assert.equal(await reloaded.get(created.id), null);
 });
+
+test('session storage does not silently cut long histories or messages', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'snowyy-sessions-history-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = createSessionStore(path.join(directory, 'sessions.json'));
+  const created = await store.create({ workspace: directory });
+  const longContent = 'complete history '.repeat(10_000);
+  const messages = Array.from({ length: 520 }, (_, index) => ({
+    role: index % 2 ? 'assistant' : 'user',
+    content: index === 519 ? longContent : `message ${index}`
+  }));
+  const timeline = Array.from({ length: 1_020 }, (_, index) => ({ type: 'notice', index }));
+  await store.setState(created.id, { messages, timeline });
+  const reopened = await store.get(created.id);
+  assert.equal(reopened.messages.length, messages.length);
+  assert.equal(reopened.messages.at(-1).content, longContent);
+  assert.equal(reopened.timeline.length, timeline.length);
+});
