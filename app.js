@@ -106,7 +106,9 @@ let requestController = null;
 let messageCount = 0;
 let activeApprovalEvent = null;
 let activeDiffIndex = 0;
-let currentSettings = { planningOnly: false, maxContextTokens: 32_000, approvalMode: 'ask', enabledTools: null };
+let currentSettings = { planningOnly: false, maxContextTokens: 32_000, reasoningEffort: 'medium', approvalMode: 'ask', enabledTools: null };
+let reasoningExpanded = false;
+try { reasoningExpanded = localStorage.getItem('snowyy:reasoning-expanded') === 'true'; } catch {}
 let currentGoals = [];
 const attachedFiles = new Set();
 const uploadedAttachments = new Map();
@@ -119,12 +121,16 @@ let mentionSelection = 0;
 let currentMention = null;
 
 function normalizeClientSettings(settings = {}) {
+  const reasoningEffort = ['low', 'medium', 'high', 'xhigh'].includes(settings.reasoningEffort)
+    ? settings.reasoningEffort
+    : 'medium';
   return {
     planningOnly: false,
     maxContextTokens: 32_000,
     approvalMode: 'ask',
     enabledTools: null,
-    ...settings
+    ...settings,
+    reasoningEffort
   };
 }
 
@@ -162,6 +168,7 @@ function scrollToBottom() {
 function setRunning(running) {
   if (!running) requestController = null;
   input.disabled = running || Boolean(activeApprovalId);
+  $('#thinkingEffortSelect').disabled = running || Boolean(activeApprovalId);
   resizeInput();
   $('.topbar p').innerHTML = running
     ? '<span class="live-dot"></span> Agent working'
@@ -228,7 +235,7 @@ function assistantParagraph() {
 }
 
 function beginAssistantSegment() {
-  if (activeReasoningBlock) activeReasoningBlock.open = false;
+  if (activeReasoningBlock) activeReasoningBlock.open = reasoningExpanded;
   activeStreamParagraph = null;
   activeReasoningBlock = null;
   activeReasoningText = '';
@@ -242,9 +249,9 @@ function appendReasoning(token, targetAssistant = activeAssistant) {
   if (!activeReasoningBlock?.isConnected) {
     activeReasoningBlock = document.createElement('details');
     activeReasoningBlock.className = 'reasoning-block';
-    activeReasoningBlock.open = true;
+    activeReasoningBlock.open = reasoningExpanded;
     const summary = document.createElement('summary');
-    summary.textContent = 'Model reasoning';
+    summary.textContent = 'Model reasoning · Ctrl+O toggles all';
     const pre = document.createElement('pre');
     activeReasoningBlock.append(summary, pre);
     $('.message-body', targetAssistant).append(activeReasoningBlock);
@@ -261,14 +268,21 @@ function renderReasoning(content, targetAssistant) {
   activeReasoningBlock = null;
   activeReasoningText = '';
   appendReasoning(content, targetAssistant);
-  if (activeReasoningBlock) activeReasoningBlock.open = false;
   activeReasoningBlock = previousBlock;
   activeReasoningText = previousText;
 }
 
+function setReasoningExpanded(expanded, persist = true) {
+  reasoningExpanded = Boolean(expanded);
+  $$('.reasoning-block').forEach((block) => { block.open = reasoningExpanded; });
+  if (persist) {
+    try { localStorage.setItem('snowyy:reasoning-expanded', String(reasoningExpanded)); } catch {}
+  }
+}
+
 function appendToken(token) {
   removeThinking();
-  if (activeReasoningBlock) activeReasoningBlock.open = false;
+  if (activeReasoningBlock) activeReasoningBlock.open = reasoningExpanded;
   if (streamSegmentPending) {
     if (streamedAssistantText.trim()) streamedAssistantText += '\n\n';
     streamSegmentPending = false;
@@ -765,6 +779,7 @@ async function addLocalAttachments(files) {
 const slashCommands = [
   { command: '/plan', detail: 'Enable planning-only mode' },
   { command: '/plan off', detail: 'Return to agent mode' },
+  { command: '/think high', detail: 'Set reasoning effort: low, medium, high, or xhigh' },
   { command: '/context', detail: 'Show the current context limit' },
   { command: '/context 128000', detail: 'Set a context-token limit' },
   { command: '/approve always', detail: 'Auto-approve writes and commands' },
@@ -948,6 +963,8 @@ function syncSessionControls() {
   modePill.innerHTML = '<span class="live-dot"></span>';
   modePill.append(document.createTextNode(planning ? ' Plan mode' : ' Agent mode'));
   modePill.title = currentSettings.approvalMode === 'always' ? 'Writes and commands are auto-approved' : 'Writes and commands require approval';
+  $('#thinkingEffortSelect').value = currentSettings.reasoningEffort;
+  $('#thinkingEffortSelect').title = `${currentSettings.reasoningEffort} reasoning effort for the next request`;
   updateContextMeter(Number($('#contextValue').title.match(/^\d+/)?.[0]) || 0);
 }
 
@@ -974,6 +991,16 @@ async function handleSlashCommand(rawCommand) {
     if (!Number.isInteger(maxContextTokens) || maxContextTokens < 1_000 || maxContextTokens > 5_000_000) throw new Error('Context must be between 1,000 and 5,000,000 tokens. Suffixes such as 128k and 1.3m are supported.');
     await patchSessionSettings({ maxContextTokens });
     appendCommandNotice('Context updated', `Maximum context is now ${maxContextTokens.toLocaleString()} tokens.`);
+    return;
+  }
+  if (command === '/think') {
+    if (!argument) {
+      appendCommandNotice('Reasoning effort', `${currentSettings.reasoningEffort} for the next request.`);
+      return;
+    }
+    if (!['low', 'medium', 'high', 'xhigh'].includes(argument)) throw new Error('Use /think low, /think medium, /think high, or /think xhigh.');
+    await patchSessionSettings({ reasoningEffort: argument });
+    appendCommandNotice('Reasoning effort updated', `${argument} will be used for the next request.`);
     return;
   }
   if (command === '/approve') {
@@ -1538,6 +1565,19 @@ $('#testProvider').addEventListener('click', async () => {
 $('#modelSelectInput').addEventListener('change', () => syncCustomModelInput({ focus: true }));
 $('#refreshModels').addEventListener('click', () => refreshModels().catch(() => {}));
 $('#baseUrlInput').addEventListener('change', () => refreshModels({ quiet: true }));
+$('#thinkingEffortSelect').addEventListener('change', async (event) => {
+  const select = event.currentTarget;
+  const previous = currentSettings.reasoningEffort;
+  select.disabled = true;
+  try {
+    await patchSessionSettings({ reasoningEffort: select.value });
+  } catch (error) {
+    select.value = previous;
+    window.alert(error.message);
+  } finally {
+    select.disabled = Boolean(requestController) || Boolean(activeApprovalId);
+  }
+});
 
 async function resolveApproval(decision) {
     if (!activeApprovalId) return;
@@ -2003,6 +2043,10 @@ $('.session-nav').addEventListener('click', async (event) => {
 });
 
 document.addEventListener('keydown', (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'o') {
+    event.preventDefault();
+    setReasoningExpanded(!reasoningExpanded);
+  }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'n') {
     event.preventDefault();
     $('#newSession').click();
@@ -2013,6 +2057,7 @@ document.addEventListener('keydown', (event) => {
 });
 
 try { setSessionsCollapsed(localStorage.getItem('snowyy:sessions-collapsed') === 'true', false); } catch { setSessionsCollapsed(false, false); }
+setReasoningExpanded(reasoningExpanded, false);
 resizeInput();
 async function bootstrap() {
   await loadConfig();

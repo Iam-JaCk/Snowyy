@@ -229,3 +229,33 @@ test('normalization reuses only a covering read hash that no later mutation inva
   const invalidated = await normalizeToolArguments(state, 'write_file', { path: 'note.txt', content: 'later', expected_sha256: '' });
   assert.equal(invalidated.args.expected_sha256, '');
 });
+
+test('normalization repairs common command and mixed editing argument shapes', async (t) => {
+  const { root, registry, hash } = await fixture(t);
+  const state = { registry, workspaceRoot: root, timeline: [] };
+  const command = await normalizeToolArguments(state, 'run_command', {
+    args: JSON.stringify(['tsc', '--noEmit']), cwd: 'note.txt', timeout_ms: '30000'
+  });
+  assert.equal(command.args.executable, 'npx');
+  assert.deepEqual(command.args.args, ['tsc', '--noEmit']);
+  assert.equal(command.args.cwd, '.');
+  assert.equal(command.args.timeout_ms, 30_000);
+  assert.match(command.adjustments.join(' '), /parent directory/);
+
+  const lines = await normalizeToolArguments(state, 'replace_lines', {
+    path: 'note.txt', start_line: '1', end_line: '1', new_text: 'ONE', old_text: 'one', expected_sha256: hash
+  });
+  assert.equal(lines.args.start_line, 1);
+  assert.equal(lines.args.end_line, 1);
+  assert.equal('old_text' in lines.args, false);
+  assert.match(lines.adjustments.join(' '), /different editing tool/);
+});
+
+test('an identical whole-file write reports a no-op without creating a transaction', async (t) => {
+  const { registry, content, hash } = await fixture(t);
+  const result = await registry.execute('write_file', { path: 'note.txt', content, expected_sha256: hash });
+  assert.equal(result.unchanged, true);
+  assert.equal(result.files[0].sha256, hash);
+  assert.equal('transaction_id' in result, false);
+  assert.match(result.message, /Do not repeat/);
+});

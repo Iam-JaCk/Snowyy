@@ -79,6 +79,52 @@ test('invalid JSON and schema errors become tool replies; valid calls still run 
   assert.deepEqual(app.requests[1].messages.filter((message) => message.role === 'tool').map((message) => message.tool_call_id), ['bad-json', 'bad-schema', 'good-read']);
 });
 
+test('tool-call reasoning is preserved and identical writes complete without approval', async (t) => {
+  const app = await fixture(t, (body, round) => {
+    if (round === 1) return { reasoning: 'I should inspect the file before editing.', tool_calls: [call('read-first', 'read_file', { path: 'note.txt' })] };
+    if (round === 2) {
+      const assistant = body.messages.findLast((message) => message.role === 'assistant');
+      assert.equal(assistant.reasoning, 'I should inspect the file before editing.');
+      const read = JSON.parse(body.messages.findLast((message) => message.role === 'tool').content);
+      return { tool_calls: [call('same-write', 'write_file', { path: 'note.txt', content: 'hello\n', expected_sha256: read.sha256 })] };
+    }
+    return { content: 'The file was already current.' };
+  });
+  const stream = await app.chat('Ensure note.txt contains hello.');
+  const result = events(stream, 'tool_result').find((event) => event.id === 'same-write');
+  assert.equal(result.result.unchanged, true);
+  assert.equal(events(stream, 'approval').length, 0);
+  assert.equal(events(stream, 'done').length, 1);
+});
+
+test('recognized patch_file aliases run as apply_patch and record the repair', async (t) => {
+  const app = await fixture(t, (_body, round) => round === 1
+    ? { tool_calls: [call('alias-patch', 'patch_file', { path: 'note.txt', old_text: 'hello', new_text: 'updated' })] }
+    : { content: 'Updated the file.' });
+  const stream = await app.chat('Update note.txt.', { approvalMode: 'always' });
+  const result = events(stream, 'tool_result')[0];
+  assert.equal(result.name, 'apply_patch');
+  assert.equal(result.ok, true);
+  const sessionId = events(stream, 'session')[0].id;
+  const session = (await (await fetch(`${app.url}/api/sessions/${sessionId}`)).json()).session;
+  const trace = session.timeline.find((entry) => entry.id === 'alias-patch');
+  assert.match(trace.argumentAdjustments.join(' '), /recognized patch_file alias/);
+  assert.equal(await readFile(path.join(app.root, 'note.txt'), 'utf8'), 'updated\n');
+});
+
+test('repeated identical tool failures warn the model to change approach', async (t) => {
+  const app = await fixture(t, (body, round) => {
+    if (round <= 2) return { tool_calls: [call(`unknown-${round}`, 'invent_tool', { value: 1 })] };
+    assert.match(body.messages.findLast((message) => message.role === 'system').content, /Do not call it again unchanged/);
+    return { content: 'Stopped repeating the unavailable tool.' };
+  });
+  const stream = await app.chat('Inspect the project without repeating failed calls.');
+  const results = events(stream, 'tool_result');
+  assert.equal(results[1].result.repeated_call, true);
+  assert.equal(results[1].result.repetition_count, 2);
+  assert.equal(events(stream, 'done').length, 1);
+});
+
 test('a stale whole-file write is forced through a fresh read and repaired safely', async (t) => {
   const app = await fixture(t, (body, round) => {
     if (round === 1) return { tool_calls: [call('stale-write', 'write_file', { path: 'note.txt', content: 'updated\n', expected_sha256: '' })] };

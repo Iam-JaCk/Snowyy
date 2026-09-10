@@ -305,6 +305,10 @@ svg {
 .composer-tool:hover { background: var(--panel-3); color: var(--text); }
 .composer-tool svg { width: 14px; }
 .mode-pill, .workspace-pill { height: 23px; display: flex; align-items: center; gap: 6px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); font-size: 8px; }
+.thinking-effort { height: 23px; display: flex; align-items: center; gap: 4px; padding: 0 4px 0 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--dim); font-size: 8px; }
+.thinking-effort select { height: 19px; padding: 0 15px 0 3px; border: 0; outline: 0; background: transparent; color: var(--muted); font-family: var(--mono); font-size: 8px; cursor: pointer; }
+.thinking-effort select:disabled { cursor: default; opacity: .55; }
+.thinking-effort select option { background: var(--panel-2); color: var(--text); }
 .workspace-pill { color: var(--dim); font-family: var(--mono); }
 .shortcut-hint { color: var(--dim); font-size: 8px; }
 .send-button { width: 29px; height: 29px; display: grid; place-items: center; border: 0; border-radius: 7px; background: var(--accent); color: #151a10; cursor: pointer; transition: opacity 150ms, transform 150ms; }

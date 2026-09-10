@@ -2,6 +2,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { lstat, readFile, realpath } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createToolRegistry, summarizeToolCall } from './lib/tools.mjs';
 import { checkProvider, streamChatCompletion } from './lib/provider.mjs';
@@ -39,6 +40,7 @@ const MUTATING_TOOL_NAMES = new Set([
 const FILE_EDIT_TOOL_NAMES = new Set(['write_file', 'apply_patch', 'insert_text', 'replace_lines', 'delete_lines']);
 const FRESH_READ_RECOVERY_CODES = new Set(['EXPECTED_HASH_REQUIRED', 'INVALID_FILE_HASH', 'FILE_CHANGED', 'PATCH_NOT_FOUND', 'PATCH_AMBIGUOUS', 'INVALID_LINE_RANGE', 'SYNTAX_INVALID']);
 const SESSION_MUTATING_TOOL_NAMES = new Set(['create_goal', 'update_goal', 'delete_goal']);
+const TOOL_NAME_ALIASES = new Map([['patch_file', 'apply_patch']]);
 
 let desktopFolderPicker = null;
 let desktopUpdateStatus = null;
@@ -69,7 +71,10 @@ function estimateTokens(messages) {
         + 40
       ), 0)
       : 0;
-    return total + contentLength(message.content) + toolCallLength + 20;
+    const reasoningLength = ['reasoning', 'reasoning_content', 'thinking']
+      .map((key) => message?.[key])
+      .find((value) => typeof value === 'string')?.length || 0;
+    return total + contentLength(message.content) + reasoningLength + toolCallLength + 20;
   }, 0) / 4);
 }
 
@@ -449,6 +454,7 @@ async function summarizeConversation(previousSummary, messages, signal, toolActi
       ],
       tools: [],
       temperature: 0,
+      reasoningEffort: 'low',
       signal
     });
     if (!result.stream_complete || reachedOutputLimit(result.finish_reason)) return fallback;
@@ -609,6 +615,26 @@ function toolResultMessage(toolCall, result) {
   };
 }
 
+function repeatedToolOutcome(state, name, args, result) {
+  const outcome = {
+    code: result?.code || null,
+    ok: result?.ok === true,
+    unchanged: result?.unchanged === true,
+    sha256: result?.sha256 || null,
+    files: Array.isArray(result?.files) ? result.files.map((file) => ({ path: file?.path || file, sha256: file?.sha256 })) : null,
+    exit_code: result?.exit_code ?? null
+  };
+  const argumentsHash = createHash('sha256').update(JSON.stringify([name, args])).digest('hex');
+  const key = JSON.stringify([argumentsHash, outcome]);
+  const count = (state.toolOutcomeCounts.get(key) || 0) + 1;
+  state.toolOutcomeCounts.set(key, count);
+  if (count < 2) return '';
+  result.repeated_call = true;
+  result.repetition_count = count;
+  result.suggestion = `This exact ${name} call has now produced the same outcome ${count} times. Do not call it again unchanged; use the result, change the arguments or approach, or finish the task.`;
+  return result.suggestion;
+}
+
 async function executeTool(response, state, toolCall, args) {
   const name = toolCall.function?.name;
   let result;
@@ -634,7 +660,9 @@ async function executeTool(response, state, toolCall, args) {
     state.approvedPreview = null;
     if (name === 'run_command') runningCommands.delete(toolCall.id);
   }
+  const repetitionWarning = repeatedToolOutcome(state, name, args, result);
   state.messages.push(toolResultMessage(toolCall, result));
+  if (repetitionWarning) state.messages.push({ role: 'system', content: repetitionWarning });
   const trace = [...state.timeline].reverse().find((item) => item.type === 'tool' && item.id === toolCall.id);
   if (trace) Object.assign(trace, { status: ok ? 'complete' : 'failed', ok, result, completedAt: new Date().toISOString() });
   if (!ok) scheduleFreshReadRecovery(state, name, args, result);
@@ -662,21 +690,29 @@ async function createApproval(state, toolCall, args, preview, response) {
 async function processToolQueue(response, state, approvalDecision = null) {
   while (state.toolIndex < state.toolCalls.length) {
     const toolCall = state.toolCalls[state.toolIndex];
-    const name = toolCall.function?.name;
+    const requestedName = toolCall.function?.name;
+    const name = TOOL_NAME_ALIASES.get(requestedName) || requestedName;
+    if (name !== requestedName) toolCall.function.name = name;
     const registered = state.registry.get(name);
     const resumingApprovedTool = registered?.approval && approvalDecision !== null;
     let args = {};
-    let argumentAdjustments = [];
+    let argumentAdjustments = name !== requestedName ? [`Used ${name} for the recognized ${requestedName} alias.`] : [];
     try {
       if (!registered) throw toolError('UNKNOWN_TOOL', `Unknown tool: ${name}`, 'Use only a tool name from the supplied tools list.');
       if (!state.allowedTools.has(name)) throw toolError('TOOL_DISABLED', `Tool is disabled for this session: ${name}`, 'Use an available tool or explain the session restriction.');
       args = parseToolArguments(toolCall);
-      if (!resumingApprovedTool) ({ args, adjustments: argumentAdjustments } = await normalizeToolArguments(state, name, args));
+      if (!resumingApprovedTool) {
+        const normalized = await normalizeToolArguments(state, name, args);
+        args = normalized.args;
+        argumentAdjustments.push(...normalized.adjustments);
+      }
       state.registry.validate(name, args);
       toolCall.function.arguments = JSON.stringify(args);
     } catch (error) {
       const result = toolFailure(error, 'TOOL_ERROR', state.workspaceRoot);
+      const repetitionWarning = repeatedToolOutcome(state, name, args, result);
       state.messages.push(toolResultMessage(toolCall, result));
+      if (repetitionWarning) state.messages.push({ role: 'system', content: repetitionWarning });
       state.timeline.push({ type: 'tool', id: toolCall.id, name, args, argumentAdjustments, status: 'failed', ok: false, result, completedAt: new Date().toISOString() });
       scheduleFreshReadRecovery(state, name, args, result);
       await persistAgentState(state);
@@ -705,6 +741,13 @@ async function processToolQueue(response, state, approvalDecision = null) {
           scheduleFreshReadRecovery(state, name, args, result);
           await persistAgentState(state);
           sendEvent(response, 'tool_result', { id: toolCall.id, name, ok: false, result });
+          state.toolIndex += 1;
+          continue;
+        }
+        if (preview?.kind === 'diff' && preview.files?.length && preview.files.every((file) => file.before_sha256 === file.after_sha256)) {
+          const trace = [...state.timeline].reverse().find((item) => item.type === 'tool' && item.id === toolCall.id);
+          if (trace) trace.approvalDecision = 'not-required-no-change';
+          await executeTool(response, state, toolCall, args);
           state.toolIndex += 1;
           continue;
         }
@@ -765,6 +808,7 @@ async function runAgent(response, state, approvalDecision = null) {
         tools: roundDefinitions,
         toolChoice: state.forceToolChoice ? 'required' : 'auto',
         temperature: state.forceToolChoice ? 0 : undefined,
+        reasoningEffort: state.reasoningEffort,
         signal: state.signal,
         onToken: (token) => {
           if (!roundStarted) {
@@ -783,6 +827,7 @@ async function runAgent(response, state, approvalDecision = null) {
 
       const outputLimited = reachedOutputLimit(assistant.finish_reason);
       const message = { role: 'assistant', content: assistant.content };
+      if (assistant.reasoning) message[assistant.reasoning_field || 'reasoning'] = assistant.reasoning;
       if (assistant.tool_calls?.length && !outputLimited) message.tool_calls = assistant.tool_calls;
       if (assistant.content || message.tool_calls?.length) state.messages.push(message);
       if (assistant.usage) {
@@ -908,7 +953,7 @@ async function handleChat(request, response) {
   if (!session) session = await sessionStore.create({ workspace: workspaceRoot });
 
   const instructions = await projectInstructions(workspaceRoot);
-  const settings = session.settings || { planningOnly: false, maxContextTokens: 32_000, approvalMode: 'ask', enabledTools: null };
+  const settings = session.settings || { planningOnly: false, maxContextTokens: 32_000, reasoningEffort: 'medium', approvalMode: 'ask', enabledTools: null };
   const maxContextTokens = Math.min(Math.max(Number(settings.maxContextTokens) || 32_000, 1_000), 5_000_000);
   const lastUser = safeMessages.at(-1);
   const conversationMessages = session.messages.length
@@ -1038,6 +1083,8 @@ async function handleChat(request, response) {
     recoveryTargetPath: '',
     activeTurnStart: 0,
     maxContextTokens,
+    toolOutcomeCounts: new Map(),
+    reasoningEffort: settings.reasoningEffort || 'medium',
     signal: controller.signal,
     config: { ...config },
     requestNeedsWorkspaceTools: imageRequestNeedsWorkspaceTools(activeRequest),

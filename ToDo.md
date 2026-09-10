@@ -16,6 +16,10 @@
 
 - [x] Show the running cmd/powershell under the chat and allow stopping or pausing them (L)
 
+- [x] Add reasoning effort controls and a global reasoning visibility shortcut. (M)
+
+- [x] Repair common tool-call argument mistakes and discourage repeated identical outcomes. (H)
+
 ### ToDo later the tests and fixes
 
 - Workflow and subagents. (NaN)

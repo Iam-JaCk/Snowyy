@@ -23,9 +23,10 @@ test('sessions persist, derive titles, reopen, and delete', async (t) => {
     timeline: [{ type: 'message', role: 'user', content: 'Explore this project and explain its architecture' }, { type: 'tool', id: 'read_1', name: 'read_file', status: 'complete' }]
   });
   assert.equal(state.timeline.length, 2);
-  const configured = await store.updateSettings(created.id, { planningOnly: true, maxContextTokens: 128_560, approvalMode: 'always', enabledTools: ['read_file'] });
+  const configured = await store.updateSettings(created.id, { planningOnly: true, maxContextTokens: 128_560, reasoningEffort: 'xhigh', approvalMode: 'always', enabledTools: ['read_file'] });
   assert.equal(configured.settings.planningOnly, true);
   assert.equal(configured.settings.maxContextTokens, 128_560);
+  assert.equal(configured.settings.reasoningEffort, 'xhigh');
   assert.equal(configured.settings.approvalMode, 'always');
   const inherited = await store.create({ workspace: 'C:\\another-project' });
   assert.deepEqual(inherited.settings, configured.settings);
