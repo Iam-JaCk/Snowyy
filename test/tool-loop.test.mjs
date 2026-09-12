@@ -263,6 +263,25 @@ test('a reasoning-only stop that promises more work forces the missing tool call
   assert.equal(events(stream, 'done').length, 1);
 });
 
+test('a promise to get the current file hash forces a fresh read instead of stopping', async (t) => {
+  const app = await fixture(t, (body, round) => {
+    if (round === 1) {
+      return { content: 'I can see duplicate blocks. Let me get the correct SHA from the full file:' };
+    }
+    if (round === 2) {
+      assert.equal(body.tool_choice, 'required');
+      assert.deepEqual(body.tools.map((tool) => tool.function.name), ['read_file']);
+      return { tool_calls: [call('hash-recovery-read', 'read_file', { path: 'note.txt' })] };
+    }
+    return { content: 'The current file contains hello.' };
+  });
+  const stream = await app.chat('Inspect duplicate blocks in note.txt and tell me what you find.');
+  const continuing = events(stream, 'status').find((event) => event.status === 'continuing');
+  assert.equal(continuing.recovery, 'tool');
+  assert.equal(events(stream, 'tool_result')[0].ok, true);
+  assert.equal(events(stream, 'done').length, 1);
+});
+
 test('Continue keeps the earlier actionable request in tool recovery context', async (t) => {
   const app = await fixture(t, (body, round) => {
     if (round === 1) return { content: 'Which replacement text should I use?' };
@@ -318,6 +337,29 @@ test('an abruptly closed provider stream preserves partial text and reports inte
   const session = (await (await fetch(`${app.url}/api/sessions/${sessionId}`)).json()).session;
   assert.equal(session.messages.at(-1).content, 'Partial but retained.');
   assert.equal(session.timeline.filter((entry) => entry.role === 'assistant').at(-1).content, 'Partial but retained.');
+  assert.equal(session.timeline.at(-1).type, 'error');
+  assert.equal(session.timeline.at(-1).code, 'PROVIDER_STREAM_INTERRUPTED');
+});
+
+test('a reasoning-only connection interruption retries in place and completes', async (t) => {
+  const app = await fixture(t, (body, round) => {
+    if (round === 1) {
+      return { reasoning: 'I was checking the file.', finish_reason: null, omit_done: true };
+    }
+    assert.match(body.messages.at(-1).content, /provider connection ended before a completion marker/i);
+    return { content: 'Recovered without requiring Continue.' };
+  });
+  const stream = await app.chat('Inspect note.txt.');
+  const recovery = events(stream, 'status').find((event) => event.reason === 'connection_interrupted');
+  assert.equal(recovery.seamless, true);
+  assert.equal(recovery.retry, 1);
+  assert.equal(events(stream, 'error').length, 0);
+  assert.equal(events(stream, 'done').length, 1);
+  assert.equal(app.requests.length, 2);
+  const sessionId = events(stream, 'session')[0].id;
+  const session = (await (await fetch(`${app.url}/api/sessions/${sessionId}`)).json()).session;
+  assert.equal(session.timeline.some((entry) => entry.type === 'connection_recovery' && entry.attempt === 1), true);
+  assert.equal(session.timeline.some((entry) => entry.type === 'error'), false);
 });
 
 test('automatic compaction persists a clean reusable context summary', async (t) => {
