@@ -159,7 +159,7 @@ test('planning can search files while attempted writes are rejected before path 
     call('search', 'search_text', { query: 'hello', path: 'note.txt' })
   ] } : { content: 'The note contains hello.' });
   const stream = await app.chat('Inspect the note and plan an edit.', { planningOnly: true });
-  assert.deepEqual(app.requests[0].tools.map((tool) => tool.function.name).sort(), ['fetch_url', 'find_files', 'list_directory', 'list_goals', 'read_file', 'search_text', 'web_search']);
+  assert.deepEqual(app.requests[0].tools.map((tool) => tool.function.name).sort(), ['fetch_url', 'find_files', 'list_directory', 'list_goals', 'list_workflows', 'read_file', 'search_text', 'set_mode', 'web_search']);
   assert.equal(events(stream, 'tool_result')[0].result.code, 'TOOL_DISABLED');
   assert.equal(events(stream, 'tool_result')[1].result.matches[0].line, 1);
   assert.equal(events(stream, 'approval').length, 0);
@@ -391,4 +391,91 @@ test('the model can create a persistent goal that is streamed to the UI', async 
   const sessionId = events(stream, 'session')[0].id;
   const session = (await (await fetch(`${app.url}/api/sessions/${sessionId}`)).json()).session;
   assert.equal(session.goals[0].status, 'active');
+});
+
+test('a workflow advances in order and remains visible after the conversation is reopened', async (t) => {
+  let workflowId;
+  const app = await fixture(t, (body, round) => {
+    if (round === 1) return { tool_calls: [call('workflow-create', 'create_workflow', {
+      title: 'Update the feature',
+      steps: ['Inspect the code', 'Implement the change', 'Verify the result']
+    })] };
+    if (round === 2) {
+      const result = JSON.parse(body.messages.findLast((message) => message.tool_call_id === 'workflow-create').content);
+      workflowId = result.workflow.id;
+      return { tool_calls: [call('workflow-advance', 'update_workflow', {
+        workflow_id: workflowId,
+        step_id: result.workflow.steps[0].id,
+        step_status: 'complete'
+      })] };
+    }
+    if (round === 3) return { content: 'The workflow is underway.' };
+    const progress = body.messages.find((message) => message.role === 'system' && String(message.content).includes('Persistent session progress'));
+    assert.ok(progress, JSON.stringify(body.messages.filter((message) => message.role === 'system')));
+    assert.match(progress.content, new RegExp(workflowId));
+    assert.match(progress.content, /Implement the change/);
+    return { content: 'I still have the active workflow context.' };
+  });
+  const first = await app.chat('Create a workflow for this feature.');
+  const workflowEvents = events(first, 'workflows');
+  assert.equal(workflowEvents.length, 2);
+  assert.equal(workflowEvents.at(-1).workflows[0].steps[0].status, 'complete');
+  assert.equal(workflowEvents.at(-1).workflows[0].steps[1].status, 'active');
+  const sessionId = events(first, 'session')[0].id;
+  const reopened = await (await fetch(`${app.url}/api/sessions/${sessionId}`)).json();
+  assert.equal(reopened.session.workflows[0].id, workflowId);
+  const second = await (await fetch(`${app.url}/api/chat`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, messages: [{ role: 'user', content: 'What remains?' }] })
+  })).text();
+  assert.equal(events(second, 'done').length, 1);
+});
+
+test('the model can leave plan mode and use newly enabled write tools in the same turn', async (t) => {
+  const app = await fixture(t, (body, round) => {
+    if (round === 1) {
+      assert.equal(body.tools.some((tool) => tool.function.name === 'apply_patch'), false);
+      assert.equal(body.tools.some((tool) => tool.function.name === 'set_mode'), true);
+      return { tool_calls: [call('enable-agent', 'set_mode', { mode: 'agent', reason: 'The user requested implementation.' })] };
+    }
+    if (round === 2) {
+      assert.equal(body.tools.some((tool) => tool.function.name === 'apply_patch'), true);
+      assert.doesNotMatch(body.messages[0].content, /Planning mode/);
+      return { tool_calls: [call('mode-edit', 'apply_patch', { path: 'note.txt', old_text: 'hello', new_text: 'updated' })] };
+    }
+    return { content: 'Switched modes and updated the file.' };
+  });
+  const stream = await app.chat('Switch to agent mode and update note.txt.', { planningOnly: true, approvalMode: 'always' });
+  assert.equal(events(stream, 'settings')[0].settings.planningOnly, false);
+  assert.equal(events(stream, 'tool_result').find((event) => event.id === 'mode-edit').ok, true);
+  assert.equal(await readFile(path.join(app.root, 'note.txt'), 'utf8'), 'updated\n');
+  const sessionId = events(stream, 'session')[0].id;
+  const session = (await (await fetch(`${app.url}/api/sessions/${sessionId}`)).json()).session;
+  assert.equal(session.settings.planningOnly, false);
+});
+
+test('provider URLs can be saved, selected later, and forgotten without storing an API key', async (t) => {
+  const app = await fixture(t, () => ({ content: 'unused' }));
+  const credentialed = await fetch(`${app.url}/api/config`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ baseUrl: 'https://user:secret@provider.example/v1', model: 'unsafe-model' })
+  });
+  assert.equal(credentialed.status, 400);
+  assert.match((await credentialed.json()).error, /API key field/);
+  const saved = await (await fetch(`${app.url}/api/config`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ baseUrl: 'https://provider.example/v1/', model: 'saved-model', apiKey: 'memory-only-key' })
+  })).json();
+  assert.deepEqual(saved.savedBaseUrls, ['https://provider.example/v1']);
+  const loaded = await (await fetch(`${app.url}/api/config`)).json();
+  assert.equal(loaded.baseUrl, 'https://provider.example/v1');
+  assert.equal(loaded.hasApiKey, true);
+  assert.deepEqual(loaded.savedBaseUrls, ['https://provider.example/v1']);
+  const forgotten = await (await fetch(`${app.url}/api/config`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ forgetBaseUrl: 'https://provider.example/v1/' })
+  })).json();
+  assert.deepEqual(forgotten.savedBaseUrls, []);
+  const persisted = JSON.parse(await readFile(path.join(app.root, 'sessions.json'), 'utf8'));
+  assert.doesNotMatch(JSON.stringify(persisted), /memory-only-key/);
 });

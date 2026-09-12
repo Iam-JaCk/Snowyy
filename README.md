@@ -16,7 +16,7 @@ npm install
 npm start
 ```
 
-Open <http://127.0.0.1:4173>. Use the model selector to configure the endpoint and choose from the models reported by Ollama or another compatible provider. Refresh the list after changing the Base URL; **Other model…** remains available for endpoints that do not advertise models. Provider settings live in server memory; API keys are not written to browser storage or project files.
+Open <http://127.0.0.1:4173>. Use the model selector to configure the endpoint and choose from the models reported by Ollama or another compatible provider. Refresh the list after changing the Base URL; **Other model…** remains available for endpoints that do not advertise models. Snowyy saves previously configured provider URLs for quick selection. API keys remain in server memory and are not written to browser storage, session data, or project files.
 
 Use the workspace control at the bottom of the sidebar to enter an absolute directory or open the native Windows folder picker. Every new session is attached to the active workspace. Reopening a saved session restores its original workspace automatically.
 
@@ -29,6 +29,8 @@ The Sessions heading in the sidebar collapses the saved-session list and remembe
 Snowyy checkpoints long tool runs before their arguments and results fill the configured context window. Each checkpoint keeps the active user objective, verified file hashes and mutations, recent failures, and the latest useful read snapshots. Conversation compaction also incorporates verified tool activity, and both kinds of compaction are recorded in the session timeline for diagnostics.
 
 Choose **Low**, **Med**, **High**, or **XHigh** from the composer to set the reasoning effort for the next request. The selection is saved with the session and inherited by new sessions; `/think high` provides the same control. Press `Ctrl+O` to expand or collapse every existing reasoning panel and set the display state for reasoning that arrives later. This display preference applies across sessions and restarts.
+
+Click the **Agent mode** or **Plan mode** pill to switch the current session. The model can also change modes when the task moves between investigation and implementation. For longer tasks, Snowyy can create an ordered workflow whose progress appears above the composer and remains available after compaction or reopening. `/workflow implement`, `/workflow debug`, and `/workflow review` create common workflow templates.
 
 Snowyy defaults to Ollama's compatibility endpoint:
 
@@ -63,7 +65,7 @@ Build the Windows x64 application and Squirrel installer:
 npm run make
 ```
 
-The installer is written to `out/make/squirrel.windows/x64/Snowyy-Setup.exe`. The unpacked portable build is under `out/Snowyy-win32-x64/`. Electron launches the Snowyy server on a private random loopback port, uses a native folder picker, and stores sessions in `%APPDATA%\Snowyy\.Snowyy\sessions.json`. Provider configuration and API keys remain memory-only.
+The installer is written to `out/make/squirrel.windows/x64/Snowyy-Setup.exe`. The unpacked portable build is under `out/Snowyy-win32-x64/`. Electron launches the Snowyy server on a private random loopback port, uses a native folder picker, and stores sessions in `%APPDATA%\Snowyy\.Snowyy\sessions.json`. Provider URLs and the current model are stored with local preferences; API keys remain memory-only.
 
 ### Automatic Windows updates
 
@@ -197,7 +199,7 @@ npm start
 | `LLM_MODEL` | `snowyy-qwen3-vl` | Provider model identifier |
 | `LLM_API_KEY` | empty | Optional provider credential |
 
-Environment values take precedence when the server starts. Settings changed in the UI last until the server is restarted.
+Environment values take precedence when the server starts. Session settings, provider URLs, and the selected model are saved locally. API keys last only until the server is restarted.
 
 ## Tools and permissions
 
@@ -213,6 +215,11 @@ Environment values take precedence when the server starts. Settings changed in t
 | `create_goal` | Creates a persistent session goal | Automatic |
 | `update_goal` | Renames a goal or marks it active/complete | Automatic |
 | `delete_goal` | Removes a session goal | Automatic |
+| `list_workflows` | Lists ordered workflows and step progress for the current session | Automatic |
+| `create_workflow` | Creates a persistent multi-step workflow | Automatic |
+| `update_workflow` | Updates workflow or step status and advances the active step | Automatic |
+| `delete_workflow` | Removes a session workflow | Automatic |
+| `set_mode` | Switches the current session between plan and agent modes | Automatic |
 | `apply_patch` | Replaces one exact text block or creates a file | Required |
 | `write_file` | Replaces a whole file using a SHA-256 concurrency guard | Required |
 | `insert_text` | Inserts text before a hash-guarded line | Required |
@@ -260,7 +267,7 @@ Pending approvals expire after ten minutes. Agent runs can use as many tool roun
 
 ## Sessions
 
-Sessions are persisted locally and can be created, reopened, or deleted from the sidebar. The first user message becomes the session title. Stored session data contains chat messages, tool history, approval decisions, goals, compaction state, settings, and its workspace path; API keys and live approval capability are never stored there. The server treats this stored history as authoritative, so a stopped or stale browser request cannot replace earlier context.
+Sessions are persisted locally and can be created, reopened, or deleted from the sidebar. The first user message becomes the session title. Stored session data contains chat messages, tool history, approval decisions, goals, workflows, compaction state, settings, and its workspace path; API keys and live approval capability are never stored there. The server treats this stored history as authoritative, so a stopped or stale browser request cannot replace earlier context.
 
 The ordered session timeline also stores assistant rounds, tool arguments, approval decisions, results, failures, and reported token usage. Reopening a session reconstructs those tool cards. Pending approvals themselves remain intentionally non-persistent and display as interrupted after a restart.
 
@@ -274,9 +281,9 @@ Each session has a writable context limit from 1,000 to 5,000,000 tokens. Before
 
 Provider output limits are handled separately from the context window. When a provider reports that a response ended because of its output-token limit, Snowyy requests the continuation and joins it to the same assistant message. If a provider reports a normal stop after only reasoning or after announcing its next action, Snowyy continues automatically; a short prompt such as "Continue" retains the earlier actionable request as its recovery objective. If a stream disconnects without a completion marker, Snowyy reports the interruption and retains every received token in the session. Stored messages and timeline events are not silently removed after a fixed count.
 
-Planning-only mode permits read-only workspace, web, and goal inspection while disabling edits, commands, and goal changes. Approval and tool settings, reasoning effort, the context limit, and provider/model selection are remembered and inherited by new sessions. Type `/help` for local commands including `/plan`, `/think`, `/context`, `/approve always`, `/approve ask`, `/files`, `/settings`, and `/new`. A `SNOWYY.md` file at the workspace root supplies durable project instructions. The Stop button aborts model streaming and saves partial assistant output; a command can also be controlled independently from its tool card.
+Planning-only mode permits read-only workspace, web, goal, and workflow inspection while disabling edits, commands, and progress changes. The model's `set_mode` tool can enter or leave planning mode during a run, and the composer mode pill offers the same control. Approval and tool settings, reasoning effort, the context limit, and provider/model selection are remembered and inherited by new sessions. Type `/help` for local commands including `/plan`, `/think`, `/workflow`, `/context`, `/approve always`, `/approve ask`, `/files`, `/settings`, and `/new`. A `SNOWYY.md` file at the workspace root supplies durable project instructions. The Stop button aborts model streaming and saves partial assistant output; a command can also be controlled independently from its tool card.
 
-Assistant responses are rendered as safe streaming Markdown with paragraphs, lists, emphasis, inline code, blockquotes, and fenced code blocks with copy controls. Raw model-provided HTML is escaped. When a compatible provider sends a separate reasoning or thinking field, Snowyy streams it into a collapsible **Model reasoning** panel. The agent may ask a focused question when required information or confirmation is missing. Session goals created by the model appear above the composer and can also be completed or removed there.
+Assistant responses are rendered as safe streaming Markdown with paragraphs, lists, emphasis, inline code, blockquotes, and fenced code blocks with copy controls. Raw model-provided HTML is escaped. While the model is working, an animated three-dot activity row shows whether it is thinking, compacting, or continuing. When a compatible provider sends a separate reasoning or thinking field, Snowyy streams it into a collapsible **Model reasoning** panel. The agent may ask a focused question when required information or confirmation is missing. Session goals and ordered workflows created by the model appear above the composer and can also be updated or removed there.
 
 ## Tests
 
@@ -284,4 +291,4 @@ Assistant responses are rendered as safe streaming Markdown with paragraphs, lis
 npm test
 ```
 
-The suite covers path traversal, symlink write escapes, bounded reads and web fetches, exact edits, authoritative session history, durable compaction, unlimited tool rounds, provider reasoning, command stop/pause/resume controls, streamed tool-call assembly, and the complete pause/approve/resume flow.
+The suite covers path traversal, symlink write escapes, bounded reads and web fetches, exact edits, authoritative session history, durable workflows and compaction, in-turn mode changes, unlimited tool rounds, provider reasoning, command stop/pause/resume controls, streamed tool-call assembly, and the complete pause/approve/resume flow.

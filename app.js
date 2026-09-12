@@ -110,10 +110,12 @@ let currentSettings = { planningOnly: false, maxContextTokens: 32_000, reasoning
 let reasoningExpanded = false;
 try { reasoningExpanded = localStorage.getItem('snowyy:reasoning-expanded') === 'true'; } catch {}
 let currentGoals = [];
+let currentWorkflows = [];
+let savedBaseUrls = [];
 const attachedFiles = new Set();
 const uploadedAttachments = new Map();
 const modifiedFiles = new Set();
-const allToolNames = ['list_directory', 'find_files', 'search_text', 'read_file', 'web_search', 'fetch_url', 'list_goals', 'create_goal', 'update_goal', 'delete_goal', 'apply_patch', 'write_file', 'insert_text', 'replace_lines', 'delete_lines', 'apply_changes', 'rollback_change', 'run_command'];
+const allToolNames = ['list_directory', 'find_files', 'search_text', 'read_file', 'web_search', 'fetch_url', 'list_goals', 'create_goal', 'update_goal', 'delete_goal', 'list_workflows', 'create_workflow', 'update_workflow', 'delete_workflow', 'set_mode', 'apply_patch', 'write_file', 'insert_text', 'replace_lines', 'delete_lines', 'apply_changes', 'rollback_change', 'run_command'];
 let mentionSearchTimer = null;
 let mentionSearchRequest = 0;
 let mentionResults = [];
@@ -169,6 +171,7 @@ function setRunning(running) {
   if (!running) requestController = null;
   input.disabled = running || Boolean(activeApprovalId);
   $('#thinkingEffortSelect').disabled = running || Boolean(activeApprovalId);
+  $('#modePill').disabled = running || Boolean(activeApprovalId);
   resizeInput();
   $('.topbar p').innerHTML = running
     ? '<span class="live-dot"></span> Agent working'
@@ -177,6 +180,12 @@ function setRunning(running) {
 
 function removeThinking(message = activeAssistant) {
   $('.thinking-row', message)?.remove();
+}
+
+function setAgentActivity(label) {
+  $('.topbar p').innerHTML = `<span class="live-dot"></span> ${label}`;
+  const thinkingLabel = $('.thinking-row em', activeAssistant);
+  if (thinkingLabel) thinkingLabel.textContent = label;
 }
 
 function appendUserMessage(copy, attachments = []) {
@@ -245,7 +254,6 @@ function beginAssistantSegment() {
 
 function appendReasoning(token, targetAssistant = activeAssistant) {
   if (!targetAssistant) return;
-  removeThinking(targetAssistant);
   if (!activeReasoningBlock?.isConnected) {
     activeReasoningBlock = document.createElement('details');
     activeReasoningBlock.className = 'reasoning-block';
@@ -494,14 +502,12 @@ function showError(message) {
 
 function finishResponse() {
   removeThinking();
-  if (activeReasoningBlock) activeReasoningBlock.open = false;
+  if (activeReasoningBlock) activeReasoningBlock.open = reasoningExpanded;
   if (streamedAssistantText.trim()) conversationHistory.push({ role: 'assistant', content: streamedAssistantText });
   activeAssistant = null;
   streamedAssistantText = '';
   streamedRoundText = '';
   activeStreamParagraph = null;
-  activeReasoningBlock = null;
-  activeReasoningText = '';
   activeReasoningBlock = null;
   activeReasoningText = '';
   streamSegmentPending = false;
@@ -580,6 +586,7 @@ async function runAgentRequest(url, payload) {
       activeSessionId = event.id;
       currentSettings = normalizeClientSettings(event.settings || currentSettings);
       renderGoals(event.goals || currentGoals);
+      renderWorkflows(event.workflows || currentWorkflows);
       syncSessionControls();
     },
     session_updated: (event) => {
@@ -596,12 +603,18 @@ async function runAgentRequest(url, payload) {
     command_output: appendCommandOutput,
     command_state: updateCommandState,
     goals: ({ goals }) => renderGoals(goals),
+    workflows: ({ workflows }) => renderWorkflows(workflows),
+    settings: ({ settings }) => {
+      currentSettings = normalizeClientSettings(settings || currentSettings);
+      syncSessionControls();
+    },
     approval: (event) => { paused = true; showApproval(event); },
     paused: () => { paused = true; },
-    status: ({ status, seamless }) => {
+    status: ({ status, seamless, round }) => {
       if (status === 'continuing' && !seamless) beginAssistantSegment();
-      if (status === 'compacting') $('.topbar p').innerHTML = '<span class="live-dot"></span> Compacting context';
-      if (status === 'thinking') $('.topbar p').innerHTML = '<span class="live-dot"></span> Agent working';
+      if (status === 'compacting') setAgentActivity('Compacting context');
+      if (status === 'thinking') setAgentActivity(round > 1 ? `Thinking · round ${round}` : 'Thinking');
+      if (status === 'continuing') setAgentActivity('Continuing');
     },
     compacted: ({ estimatedTokensAfter }) => {
       if (Number.isFinite(estimatedTokensAfter)) updateContextMeter(estimatedTokensAfter);
@@ -780,6 +793,7 @@ const slashCommands = [
   { command: '/plan', detail: 'Enable planning-only mode' },
   { command: '/plan off', detail: 'Return to agent mode' },
   { command: '/think high', detail: 'Set reasoning effort: low, medium, high, or xhigh' },
+  { command: '/workflow implement', detail: 'Create an implement, debug, or review workflow' },
   { command: '/context', detail: 'Show the current context limit' },
   { command: '/context 128000', detail: 'Set a context-token limit' },
   { command: '/approve always', detail: 'Auto-approve writes and commands' },
@@ -962,7 +976,8 @@ function syncSessionControls() {
   const modePill = $('.mode-pill');
   modePill.innerHTML = '<span class="live-dot"></span>';
   modePill.append(document.createTextNode(planning ? ' Plan mode' : ' Agent mode'));
-  modePill.title = currentSettings.approvalMode === 'always' ? 'Writes and commands are auto-approved' : 'Writes and commands require approval';
+  const approval = currentSettings.approvalMode === 'always' ? 'writes are auto-approved' : 'writes require approval';
+  modePill.title = `Switch to ${planning ? 'agent' : 'plan'} mode; ${approval}`;
   $('#thinkingEffortSelect').value = currentSettings.reasoningEffort;
   $('#thinkingEffortSelect').title = `${currentSettings.reasoningEffort} reasoning effort for the next request`;
   updateContextMeter(Number($('#contextValue').title.match(/^\d+/)?.[0]) || 0);
@@ -971,7 +986,8 @@ function syncSessionControls() {
 async function handleSlashCommand(rawCommand) {
   const commandLine = rawCommand.trim();
   const [command, ...argumentsList] = commandLine.split(/\s+/);
-  const argument = argumentsList.join(' ').toLowerCase();
+  const rawArgument = argumentsList.join(' ');
+  const argument = rawArgument.toLowerCase();
   $('#slashMenu').hidden = true;
   appendUserMessage(commandLine);
 
@@ -979,7 +995,7 @@ async function handleSlashCommand(rawCommand) {
     const planningOnly = argument === 'off' ? false : argument === 'on' || !argument ? true : null;
     if (planningOnly === null) throw new Error('Use /plan, /plan on, or /plan off.');
     await patchSessionSettings({ planningOnly });
-    appendCommandNotice('Mode updated', planningOnly ? 'Planning-only mode is enabled. Tools are disabled.' : 'Agent mode is enabled.');
+    appendCommandNotice('Mode updated', planningOnly ? 'Plan mode is enabled. Read-only tools remain available.' : 'Agent mode is enabled.');
     return;
   }
   if (command === '/context') {
@@ -1001,6 +1017,26 @@ async function handleSlashCommand(rawCommand) {
     if (!['low', 'medium', 'high', 'xhigh'].includes(argument)) throw new Error('Use /think low, /think medium, /think high, or /think xhigh.');
     await patchSessionSettings({ reasoningEffort: argument });
     appendCommandNotice('Reasoning effort updated', `${argument} will be used for the next request.`);
+    return;
+  }
+  if (command === '/workflow') {
+    if (!argument) {
+      const active = currentWorkflows.filter((workflow) => workflow.status === 'active');
+      appendCommandNotice('Workflows', active.length
+        ? active.map((workflow) => `${workflow.title}: ${workflow.steps.filter((step) => ['complete', 'skipped'].includes(step.status)).length}/${workflow.steps.length}`).join('\n')
+        : 'Use /workflow implement, /workflow debug, or /workflow review. Add a title after the template if helpful.');
+      return;
+    }
+    const [templateName, ...titleParts] = rawArgument.split(/\s+/);
+    const template = templateName.toLowerCase();
+    if (!['implement', 'debug', 'review'].includes(template)) throw new Error('Use /workflow implement, /workflow debug, or /workflow review.');
+    if (!activeSessionId) await createNewSession();
+    const result = await apiJson(`/api/sessions/${activeSessionId}/workflows`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ template, title: titleParts.join(' ') })
+    });
+    renderWorkflows(result.workflows);
+    appendCommandNotice('Workflow created', result.workflow.title);
     return;
   }
   if (command === '/approve') {
@@ -1076,6 +1112,8 @@ document.addEventListener('click', (event) => {
   if (commandControl) controlCommand(commandControl);
   const goalControl = event.target.closest('[data-goal-action]');
   if (goalControl) changeGoal(goalControl).catch((error) => window.alert(error.message));
+  const workflowControl = event.target.closest('[data-workflow-action]');
+  if (workflowControl) changeWorkflow(workflowControl).catch((error) => window.alert(error.message));
   const copyCode = event.target.closest('[data-copy-code]');
   if (copyCode) {
     const code = copyCode.closest('.markdown-code')?.querySelector('code')?.textContent || '';
@@ -1140,6 +1178,7 @@ function resetConversation() {
   updateAttachmentPill();
   permissionToast.classList.remove('visible');
   renderGoals([]);
+  renderWorkflows([]);
   setRunning(false);
 }
 
@@ -1241,6 +1280,85 @@ function renderGoals(goals = []) {
   }
 }
 
+function renderWorkflows(workflows = []) {
+  currentWorkflows = Array.isArray(workflows) ? workflows : [];
+  const panel = $('#workflowPanel');
+  const list = $('#workflowList');
+  panel.hidden = currentWorkflows.length === 0;
+  $('#workflowCount').textContent = String(currentWorkflows.length);
+  list.replaceChildren();
+  for (const workflow of currentWorkflows) {
+    const item = document.createElement('div');
+    item.className = `workflow-item ${workflow.status}`;
+    item.dataset.workflowId = workflow.id;
+    const heading = document.createElement('div');
+    heading.className = 'workflow-heading';
+    const title = document.createElement('span');
+    title.className = 'workflow-title';
+    title.textContent = workflow.title;
+    title.title = workflow.title;
+    const actions = document.createElement('span');
+    actions.className = 'workflow-actions';
+    if (workflow.status !== 'complete') {
+      const complete = document.createElement('button');
+      complete.type = 'button';
+      complete.dataset.workflowAction = 'complete';
+      complete.title = 'Complete workflow';
+      complete.textContent = '✓';
+      actions.append(complete);
+    }
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.dataset.workflowAction = 'remove';
+    remove.title = 'Remove workflow';
+    remove.textContent = '×';
+    actions.append(remove);
+    heading.append(title, actions);
+
+    const completed = workflow.steps.filter((step) => ['complete', 'skipped'].includes(step.status)).length;
+    const progress = document.createElement('div');
+    progress.className = 'workflow-progress';
+    const progressBar = document.createElement('span');
+    progressBar.style.width = `${Math.round((completed / workflow.steps.length) * 100)}%`;
+    progress.append(progressBar);
+    const steps = document.createElement('div');
+    steps.className = 'workflow-steps';
+    for (const step of workflow.steps) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = `workflow-step ${step.status}`;
+      button.dataset.workflowAction = 'step';
+      button.dataset.stepId = step.id;
+      button.textContent = `${step.status === 'complete' ? '✓' : step.status === 'skipped' ? '–' : step.status === 'active' ? '●' : '○'} ${step.title}`;
+      button.title = step.status === 'active' ? 'Mark step complete' : `Make step active: ${step.title}`;
+      steps.append(button);
+    }
+    item.append(heading, progress, steps);
+    list.append(item);
+  }
+}
+
+async function changeWorkflow(button) {
+  const item = button.closest('[data-workflow-id]');
+  const workflow = currentWorkflows.find(({ id }) => id === item?.dataset.workflowId);
+  if (!workflow || !activeSessionId) return;
+  button.disabled = true;
+  let options;
+  if (button.dataset.workflowAction === 'remove') options = { method: 'DELETE' };
+  else if (button.dataset.workflowAction === 'complete') {
+    options = { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'complete' }) };
+  } else {
+    const step = workflow.steps.find(({ id }) => id === button.dataset.stepId);
+    if (!step) return;
+    options = {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ step_id: step.id, step_status: step.status === 'active' ? 'complete' : 'active' })
+    };
+  }
+  const result = await apiJson(`/api/sessions/${activeSessionId}/workflows/${workflow.id}`, options);
+  renderWorkflows(result.workflows);
+}
+
 async function changeGoal(button) {
   const item = button.closest('[data-goal-id]');
   const goal = currentGoals.find(({ id }) => id === item?.dataset.goalId);
@@ -1337,6 +1455,7 @@ async function openSession(sessionId) {
   syncSessionControls();
   conversationHistory = session.messages.map((message) => ({ ...message }));
   renderGoals(session.goals || []);
+  renderWorkflows(session.workflows || []);
   if (session.timeline?.length) renderTimeline(session.timeline);
   else session.messages.forEach(renderSavedMessage);
   $('#sessionTitle').textContent = session.title;
@@ -1356,6 +1475,7 @@ async function createNewSession() {
   activeSessionId = result.session.id;
   currentSettings = normalizeClientSettings(result.session.settings || currentSettings);
   renderGoals(result.session.goals || []);
+  renderWorkflows(result.session.workflows || []);
   syncSessionControls();
   $('#sessionTitle').textContent = 'New session';
   $('.welcome-block h2').textContent = 'Start a new session';
@@ -1373,7 +1493,30 @@ async function saveConfig(values) {
   });
   const body = await readApiJson(response, '/api/config');
   modelName.textContent = body.model;
+  renderSavedBaseUrls(body.savedBaseUrls || savedBaseUrls);
   return body;
+}
+
+function normalizedBaseUrl(value) {
+  return String(value || '').trim().replace(/\/+$/, '');
+}
+
+function renderSavedBaseUrls(urls = []) {
+  savedBaseUrls = [...new Set(urls
+    .filter((value) => typeof value === 'string')
+    .map(normalizedBaseUrl)
+    .filter(Boolean))];
+  const list = $('#savedBaseUrlList');
+  list.replaceChildren(...savedBaseUrls.map((url) => {
+    const option = document.createElement('option');
+    option.value = url;
+    return option;
+  }));
+  const current = normalizedBaseUrl($('#baseUrlInput').value);
+  $('#forgetBaseUrl').disabled = !savedBaseUrls.includes(current);
+  $('#baseUrlInput').title = savedBaseUrls.length
+    ? `${savedBaseUrls.length} saved provider URL${savedBaseUrls.length === 1 ? '' : 's'}`
+    : 'Provider URL';
 }
 
 const CUSTOM_MODEL_VALUE = '__snowyy_custom_model__';
@@ -1479,6 +1622,7 @@ async function loadConfig() {
     const config = await getConfig();
     modelName.textContent = config.model;
     $('#baseUrlInput').value = config.baseUrl;
+    renderSavedBaseUrls(config.savedBaseUrls || []);
     $('#modelInput').value = config.model;
     populateModelSelect([], config.model);
     const version = config.app?.version || 'unknown';
@@ -1564,7 +1708,27 @@ $('#testProvider').addEventListener('click', async () => {
 
 $('#modelSelectInput').addEventListener('change', () => syncCustomModelInput({ focus: true }));
 $('#refreshModels').addEventListener('click', () => refreshModels().catch(() => {}));
+$('#baseUrlInput').addEventListener('input', () => renderSavedBaseUrls(savedBaseUrls));
 $('#baseUrlInput').addEventListener('change', () => refreshModels({ quiet: true }));
+$('#forgetBaseUrl').addEventListener('click', async () => {
+  const button = $('#forgetBaseUrl');
+  const forgetBaseUrl = normalizedBaseUrl($('#baseUrlInput').value);
+  if (!forgetBaseUrl || !savedBaseUrls.includes(forgetBaseUrl)) return;
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ forgetBaseUrl })
+    });
+    const result = await readApiJson(response, '/api/config');
+    renderSavedBaseUrls(result.savedBaseUrls || []);
+  } catch (error) {
+    button.disabled = false;
+    $('#settingsStatus').className = 'settings-status failed';
+    $('#settingsStatus p').textContent = error.message;
+  }
+});
 $('#thinkingEffortSelect').addEventListener('change', async (event) => {
   const select = event.currentTarget;
   const previous = currentSettings.reasoningEffort;
@@ -1576,6 +1740,17 @@ $('#thinkingEffortSelect').addEventListener('change', async (event) => {
     window.alert(error.message);
   } finally {
     select.disabled = Boolean(requestController) || Boolean(activeApprovalId);
+  }
+});
+$('#modePill').addEventListener('click', async () => {
+  const button = $('#modePill');
+  button.disabled = true;
+  try {
+    await patchSessionSettings({ planningOnly: !currentSettings.planningOnly });
+  } catch (error) {
+    window.alert(error.message);
+  } finally {
+    button.disabled = Boolean(requestController) || Boolean(activeApprovalId);
   }
 });
 

@@ -1,4 +1,4 @@
-## ToDo currently / Priority indicator: H - High, M - Medium, L - Low, NaN - Not available
+## ToDo previously / Priority indicator: H - High, M - Medium, L - Low, NaN - Not available
 
 - [x] Sometimes it seems to be stopping, after it does, context gets reset or lowered. Might be because since it stops, it forgets everything in that duration and resets the context to last completed chat. (H)
 
@@ -20,7 +20,15 @@
 
 - [x] Repair common tool-call argument mistakes and discourage repeated identical outcomes. (H)
 
-### ToDo later the tests and fixes
+## ToDo currently / Priority indicator: H - High, M - Medium, L - Low, NaN - Not available
 
-- Workflow and subagents. (NaN)
+- [x] Workflow (H)
+
+- [x] UI Rework to beautify the app, for example adding 3 animated dots while AI is thinking etc. (L)
+
+- [x] Improving tools if there are any weaknesses, also confirm if thinking works properly or not (M)
+
+- [x] Ability to save new base urls (L)
+
+- [x] Give the AI the ability to enter or exit plan mode whenever (M)
 

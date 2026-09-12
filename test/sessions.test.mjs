@@ -35,7 +35,18 @@ test('sessions persist, derive titles, reopen, and delete', async (t) => {
   const completedGoal = await store.updateGoal(created.id, goalState.goal.id, { status: 'complete' });
   assert.equal(completedGoal.goal.status, 'complete');
   await store.setState(created.id, { context: { summary: 'Earlier decisions.', summarizedMessages: 1 } });
-  await store.updatePreferences({ provider: { baseUrl: 'https://provider.example/v1', model: 'chosen-model' } });
+  await store.updatePreferences({ provider: { baseUrl: 'https://provider.example/v1', model: 'chosen-model', addBaseUrl: 'https://provider.example/v1' } });
+  await store.updatePreferences({ provider: { addBaseUrl: 'http://local.example/v1/' } });
+  await store.updatePreferences({ provider: { removeBaseUrl: 'http://local.example/v1' } });
+  const workflowState = await store.createWorkflow(created.id, {
+    title: 'Ship persistence',
+    steps: ['Implement storage', 'Verify reload']
+  });
+  const advancedWorkflow = await store.updateWorkflow(created.id, workflowState.workflow.id, {
+    step_id: workflowState.workflow.steps[0].id,
+    step_status: 'complete'
+  });
+  assert.equal(advancedWorkflow.workflow.steps[1].status, 'active');
 
   const reloaded = createSessionStore(file);
   const opened = await reloaded.get(created.id);
@@ -44,7 +55,13 @@ test('sessions persist, derive titles, reopen, and delete', async (t) => {
   assert.equal(opened.settings.maxContextTokens, 128_560);
   assert.equal(opened.context.summary, 'Earlier decisions.');
   assert.equal(opened.goals[0].status, 'complete');
-  assert.deepEqual((await reloaded.getPreferences()).provider, { baseUrl: 'https://provider.example/v1', model: 'chosen-model' });
+  assert.equal(opened.workflows[0].steps[0].status, 'complete');
+  assert.equal(opened.workflows[0].steps[1].status, 'active');
+  assert.deepEqual((await reloaded.getPreferences()).provider, {
+    baseUrl: 'https://provider.example/v1',
+    model: 'chosen-model',
+    baseUrls: ['https://provider.example/v1']
+  });
   assert.equal((await reloaded.list()).find((session) => session.id === created.id).messageCount, 2);
   assert.equal(await reloaded.remove(created.id), true);
   assert.equal(await reloaded.get(created.id), null);

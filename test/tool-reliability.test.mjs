@@ -242,13 +242,30 @@ test('normalization repairs common command and mixed editing argument shapes', a
   assert.equal(command.args.timeout_ms, 30_000);
   assert.match(command.adjustments.join(' '), /parent directory/);
 
-  const lines = await normalizeToolArguments(state, 'replace_lines', {
-    path: 'note.txt', start_line: '1', end_line: '1', new_text: 'ONE', old_text: 'one', expected_sha256: hash
+  const commandString = await normalizeToolArguments(state, 'run_command', {
+    command: 'npx tsc --noEmit', workingDirectory: 'note.txt', timeoutMs: '30000'
   });
+  assert.equal(commandString.args.executable, 'npx');
+  assert.deepEqual(commandString.args.args, ['tsc', '--noEmit']);
+  assert.equal(commandString.args.cwd, '.');
+  assert.equal(commandString.args.timeout_ms, 30_000);
+  assert.equal('command' in commandString.args, false);
+
+  const lines = await normalizeToolArguments(state, 'replace_lines', {
+    filePath: 'note.txt', startLine: '1', endLine: '1', newText: 'ONE', old_text: 'one', expectedHash: hash
+  });
+  assert.equal(lines.args.path, 'note.txt');
   assert.equal(lines.args.start_line, 1);
   assert.equal(lines.args.end_line, 1);
   assert.equal('old_text' in lines.args, false);
   assert.match(lines.adjustments.join(' '), /different editing tool/);
+
+  const rollback = await normalizeToolArguments(state, 'rollback_change', { transactionId: 'transaction-1' });
+  assert.deepEqual(rollback.args, { transaction_id: 'transaction-1' });
+  const workflow = await normalizeToolArguments(state, 'update_workflow', {
+    workflowId: 'workflow-1', stepId: 'step-1', stepStatus: 'complete'
+  });
+  assert.deepEqual(workflow.args, { workflow_id: 'workflow-1', step_id: 'step-1', step_status: 'complete' });
 });
 
 test('an identical whole-file write reports a no-op without creating a transaction', async (t) => {
